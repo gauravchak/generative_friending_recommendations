@@ -1,7 +1,27 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, Tuple
 from dataclasses import dataclass
+
+
+class SwiGLU(nn.Module):
+    """
+    SwiGLU activation function: Swish(xW + b) ⊗ (xV + c)
+    
+    This is a modern activation function that combines Swish with a gating mechanism.
+    It's particularly effective for transformer-based models and can provide better
+    feature selection and interaction modeling than GELU.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int, device: str = "cpu"):
+        super().__init__()
+        self.w_gate = nn.Linear(input_dim, hidden_dim, device=device)
+        self.w_value = nn.Linear(input_dim, hidden_dim, device=device)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = F.silu(self.w_gate(x))  # Swish/SiLU activation
+        value = self.w_value(x)
+        return gate * value  # Element-wise multiplication
 
 
 @dataclass
@@ -90,7 +110,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         # Actor representation network
         self.actor_projection = nn.Sequential(
             nn.Linear(embedding_dim + embedding_dim * 2 + embedding_dim * 2, hidden_dim, device=device),  # actor_id + history_repr + latent_cross
-            nn.GELU(),
+            nn.GELU(),  # To use SwiGLU instead, replace with: SwiGLU(hidden_dim, hidden_dim, device=device)
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, embedding_dim, device=device),
         )
@@ -101,7 +121,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         # Target prediction network
         self.get_actor_action_repr = nn.Sequential(
             nn.Linear(embedding_dim * 3, hidden_dim, device=device),  # actor_repr + action_emb + interaction
-            nn.GELU(),
+            nn.GELU(),  # To use SwiGLU instead, replace with: SwiGLU(hidden_dim, hidden_dim, device=device)
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, embedding_dim, device=device),  # Output D_emb for dot product operations
         )
@@ -114,25 +134,20 @@ class NextTargetPredictionUserIDs(nn.Module):
         nn.init.xavier_uniform_(self.user_embeddings.weight)
         nn.init.xavier_uniform_(self.action_embeddings.weight)
     
-    def encode_history(
-        self, 
-        history_actions: torch.Tensor, 
-        history_targets: torch.Tensor, 
+    def _encode_history_with_transformer(
+        self,
+        history_actions: torch.Tensor,
+        history_targets: torch.Tensor,
         history_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Encode user's interaction history using transformer encoder.
+        Shared method to encode history using transformer encoder.
         
-        This method handles variable-length histories using a mask. The transformer
-        will only attend to valid (masked) positions, and the final representation
-        is computed as a mean over valid tokens only.
-        
-        Data Flow:
-        1. Each history item: [action_id, target_user_id] 
-        2. Embeddings: [action_embedding(D_emb), target_user_embedding(D_emb)]
-        3. Concatenated: [action_features + target_features] = [D_emb * 2]
-        4. Transformer processes sequence of these concatenated embeddings
-        5. Output: Mean-pooled representation of the entire interaction history
+        This method handles the common logic of:
+        1. Getting embeddings for actions and targets
+        2. Concatenating them
+        3. Applying transformer encoding with masking
+        4. Mean pooling over valid tokens
         
         Args:
             history_actions: [B, N] - action IDs (padded with zeros for short histories)
@@ -178,6 +193,38 @@ class NextTargetPredictionUserIDs(nn.Module):
         history_repr = masked_encoded.sum(dim=1) / valid_tokens  # [B, D_emb * 2]
         
         return history_repr
+
+    def encode_history(
+        self,
+        history_actions: torch.Tensor,
+        history_targets: torch.Tensor,
+        history_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Encode user's interaction history using transformer encoder.
+        
+        This method handles variable-length histories using a mask. The transformer
+        will only attend to valid (masked) positions, and the final representation
+        is computed as a mean over valid tokens only.
+        
+        Data Flow:
+        1. Each history item: [action_id, target_user_id] 
+        2. Embeddings: [action_embedding(D_emb), target_user_embedding(D_emb)]
+        3. Concatenated: [action_features + target_features] = [D_emb * 2]
+        4. Transformer processes sequence of these concatenated embeddings
+        5. Output: Mean-pooled representation of the entire interaction history
+        
+        Args:
+            history_actions: [B, N] - action IDs (padded with zeros for short histories)
+            history_targets: [B, N] - target user IDs (padded with zeros for short histories)
+            history_mask: [B, N] - validity mask where 1=valid, 0=padding
+                Example: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1] for a user with 2 interactions
+                in a sequence of length 16 (valid entries at the end)
+            
+        Returns:
+            torch.Tensor: [B, D_emb * 2] - encoded history representation
+        """
+        return self._encode_history_with_transformer(history_actions, history_targets, history_mask)
     
     def forward(
         self, 
@@ -369,28 +416,28 @@ class NextTargetPredictionUserIDs(nn.Module):
         """
         batch_size = batch.actor_history_actions.size(0)
         history_length = batch.actor_history_actions.size(1)
-        
-        # Ensure we have enough history for temporal examples
-        if history_length < num_temporal_examples + 1:
-            num_temporal_examples = max(1, history_length - 1)
-        
+
         # Get embeddings for each history item
         action_embeds = self.action_embeddings(batch.actor_history_actions)  # [B, N, D_emb]
         target_embeds = self.user_embeddings(batch.actor_history_targets)    # [B, N, D_emb]
         
         # Concatenate action and target embeddings
         history_embeds = torch.cat([action_embeds, target_embeds], dim=-1)  # [B, N, D_emb * 2]
-        
+
         # For temporal pretraining, we use the standard transformer encoder
         # and extract representations at each position for temporal prediction
         # This provides a good approximation for temporal learning
-        
+
         # Apply transformer encoder (standard, not causal)
         encoded_history = self.history_encoder(
             history_embeds,
             src_key_padding_mask=(batch.actor_history_mask == 0).bool()  # Padding mask
         )  # [B, N, D_emb * 2]
-        
+
+        # Ensure we have enough history for temporal examples
+        if history_length < num_temporal_examples + 1:
+            num_temporal_examples = max(1, history_length - 1)
+
         # Determine which positions to use for temporal prediction
         # We want the last num_temporal_examples positions that have valid next actions
         temporal_positions = []
@@ -457,18 +504,10 @@ class NextTargetPredictionUserIDs(nn.Module):
         # Reshape back to [B, num_temporal, num_users]
         logits = logits.view(batch_size, len(temporal_positions), self.num_users)  # [B, num_temporal, num_users]
         
-        # Create mask to exclude invalid targets
-        # Reshape temporal_targets to [B, num_temporal, 1] for broadcasting
-        temporal_targets_expanded = temporal_targets.unsqueeze(-1)  # [B, num_temporal, 1]
-        
-        # Create target mask: 1 for valid targets, 0 for positive targets
-        target_mask = torch.ones(batch_size, len(temporal_positions), self.num_users, device=self.device)  # [B, num_temporal, num_users]
-        
-        # Use scatter to efficiently set positive targets to 0
-        target_mask.scatter_(2, temporal_targets_expanded, 0)  # [B, num_temporal, num_users]
-        
-        # Apply mask
-        masked_logits = logits - (1 - target_mask) * 1e9  # [B, num_temporal, num_users]
+        # Note: We do NOT mask the logits here because cross_entropy automatically
+        # handles the positive class selection via the target argument.
+        # Masking would prevent the model from learning the correct positive class.
+        masked_logits = logits  # [B, num_temporal, num_users]
         
         # Flatten for loss computation
         masked_logits_flat = masked_logits.view(-1, self.num_users)  # [B * num_temporal, num_users]
