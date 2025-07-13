@@ -258,7 +258,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         if attention_mask_padding.all():
             # If all tokens are masked, return a zero tensor of the expected output shape
             # The output shape is [B, N, D_emb]
-            return torch.zeros(batch_size, seq_len, self.D_emb, device=self.device)
+            return torch.zeros(batch_size, seq_len, self.embedding_dim, device=self.device)
 
         # --- Attention Calculation ---
 
