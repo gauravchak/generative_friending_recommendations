@@ -222,65 +222,104 @@ class NextTargetPredictionUserIDs(nn.Module):
         history_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Encode history using simple pooled multi-head attention.
-        
-        This method uses K=2 learnable query vectors to compute attention over
-        the history sequence. For each position i, it attends to positions 0 to i
-        (causal attention) and produces a weighted representation.
-        
+        Encode history using simple pooled multi-head attention with fixed learnable queries.
+
+        This method uses `self.num_attention_heads` learnable query vectors to compute attention
+        over the history sequence. For each position `i`, it attends to positions `0` to `i`
+        (causal attention) and produces a weighted representation, using the same set of
+        learnable queries for all output positions.
+
         Args:
             history_actions: [B, N] - action IDs (padded with zeros for short histories)
             history_targets: [B, N] - target user IDs (padded with zeros for short histories)
             history_mask: [B, N] - validity mask where 1=valid, 0=padding
-            
+
         Returns:
             torch.Tensor: [B, N, D_emb] - full sequence encoded history
         """
         # Get embeddings for each history item
-        action_embeds = self.action_embeddings(history_actions)  # [B, N, D_emb]
-        target_embeds = self.user_embeddings(history_targets)    # [B, N, D_emb]
-        
-        # Concatenate action and target embeddings
-        history_embeds = torch.cat([action_embeds, target_embeds], dim=-1)  # [B, N, D_emb * 2]
-        
-        batch_size, seq_len, embed_dim = history_embeds.shape
-        
-        # Check if all tokens are masked
-        attention_mask = (history_mask == 0).bool()  # [B, N]
-        if attention_mask.all():
-            # If all tokens are masked, pass a zero tensor through the projection layer
-            zeros_input = torch.zeros(batch_size, seq_len, self.num_attention_heads * embed_dim, device=self.device)
-            return self.simple_attention_projection(zeros_input)
-        
-        # Compute attention scores: [K, B, N, N]
-        # queries: [K, 1, 1, D_emb * 2], history_embeds: [1, B, N, D_emb * 2]
-        queries = self.learnable_queries.unsqueeze(1).unsqueeze(1)  # [K, 1, 1, D_emb * 2]
-        attention_scores = torch.matmul(queries, history_embeds.unsqueeze(0).transpose(-2, -1))  # [K, B, N, N]
-        attention_scores = attention_scores / (embed_dim ** 0.5)  # Scale by sqrt(d_k)
-        
-        # Create causal mask: upper triangular matrix (True for positions to mask)
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=self.device), diagonal=1).bool()  # [N, N]
-        
-        # Apply causal mask and padding mask
-        attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))  # [K, B, N, N]
-        attention_scores = attention_scores.masked_fill(attention_mask.unsqueeze(0).unsqueeze(-1), float('-inf'))  # [K, B, N, N]
-        
-        # Apply softmax to get attention weights (with numerical stability)
-        attention_weights = torch.softmax(attention_scores, dim=-1)  # [K, B, N, N]
-        
-        # Replace NaN values with zeros
+        # action_embeds: [B, N, D_emb]
+        action_embeds = self.action_embeddings(history_actions)
+        # target_embeds: [B, N, D_emb]
+        target_embeds = self.user_embeddings(history_targets)
+
+        # Concatenate action and target embeddings to form the full history embeddings
+        # history_embeds: [B, N, D_emb * 2]
+        history_embeds = torch.cat([action_embeds, target_embeds], dim=-1)
+
+        batch_size, seq_len, embed_dim_combined = history_embeds.shape
+        # embed_dim_combined is D_emb * 2
+
+        # Create a boolean mask for padded tokens: True where token is padding (0), False where valid (1)
+        # attention_mask_padding: [B, N]
+        attention_mask_padding = (history_mask == 0).bool()
+
+        # Handle the edge case where all tokens in all sequences are masked (e.g., empty batches)
+        if attention_mask_padding.all():
+            # If all tokens are masked, return a zero tensor of the expected output shape
+            # The output shape is [B, N, D_emb]
+            return torch.zeros(batch_size, seq_len, self.D_emb, device=self.device)
+
+        # --- Attention Calculation ---
+
+        # 1. Compute raw attention scores between learnable queries and history embeddings (Keys)
+        # self.learnable_queries: [num_attention_heads, embed_dim_combined] (K, D_combined)
+        # history_embeds: [B, N, embed_dim_combined] (B, N, D_combined)
+        # torch.einsum('kd,bnd->kbn', ...) performs (K, D_combined) @ (B, D_combined, N) -> (K, B, N)
+        # raw_attention_scores[k, b, j] = dot_product(learnable_queries[k], history_embeds[b, j])
+        raw_attention_scores = torch.einsum('kd,bnd->kbn', self.learnable_queries, history_embeds)
+        # Scale by sqrt(d_k), where d_k is the dimension of the keys (embed_dim_combined)
+        raw_attention_scores = raw_attention_scores / (embed_dim_combined ** 0.5)
+        # raw_attention_scores: [num_attention_heads, B, N]
+
+        # 2. Expand raw scores to match the desired attention matrix shape [K, B, N (query_pos), N (key_pos)]
+        # For each output position 'i' (the query_pos dimension), we use the same fixed learnable queries.
+        # So, we simply replicate the raw scores across the 'query_pos' dimension.
+        # attention_scores[k, b, i, j] will be raw_attention_scores[k, b, j]
+        attention_scores = raw_attention_scores.unsqueeze(2).expand(-1, -1, seq_len, -1)
+        # attention_scores: [num_attention_heads, B, N, N]
+
+        # 3. Create and apply the causal mask
+        # causal_mask: [N, N] - True for upper triangle (positions j > i), False otherwise
+        # This ensures that for output position 'i', attention is only paid to input positions 'j' <= 'i'.
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=self.device), diagonal=1).bool()
+        # Expand causal_mask to [1, 1, N, N] for broadcasting
+        attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        # attention_scores: [num_attention_heads, B, N, N]
+
+        # 4. Apply the padding mask
+        # attention_mask_padding: [B, N] - True where input token is padding
+        # We need to mask the 'key_pos' dimension (last N) for padded inputs.
+        # Unsqueeze attention_mask_padding to [1, B, 1, N] to broadcast correctly.
+        attention_scores = attention_scores.masked_fill(attention_mask_padding.unsqueeze(0).unsqueeze(2), float('-inf'))
+        # attention_scores: [num_attention_heads, B, N, N]
+
+        # 5. Apply softmax to get attention weights
+        # Softmax is applied along the last dimension (key_pos), ensuring weights sum to 1 for each query-output pair.
+        attention_weights = torch.softmax(attention_scores, dim=-1)
+        # attention_weights: [num_attention_heads, B, N, N]
+
+        # Replace NaN values with zeros (for numerical stability, especially after softmax on -inf values)
         attention_weights = torch.nan_to_num(attention_weights, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # Apply attention weights to get weighted representations
-        weighted_sum = torch.matmul(attention_weights, history_embeds.unsqueeze(0))  # [K, B, N, D_emb * 2]
-        
-        # Reshape and concatenate all attention heads
-        weighted_sum = weighted_sum.transpose(0, 1)  # [B, K, N, D_emb * 2]
-        weighted_sum = weighted_sum.reshape(batch_size, seq_len, self.num_attention_heads * embed_dim)  # [B, N, K * D_emb * 2]
-        
-        # Project to final embedding dimension
-        encoded_history = self.simple_attention_projection(weighted_sum)  # [B, N, D_emb]
-        
+
+        # 6. Apply attention weights to get weighted representations (Context Vectors)
+        # history_embeds: [B, N, embed_dim_combined] (V)
+        # Unsqueeze history_embeds to [1, B, N, embed_dim_combined] for broadcasting with attention_weights
+        # weighted_sum = (K, B, N, N) @ (1, B, N, D_combined) -> (K, B, N, D_combined)
+        weighted_sum = torch.matmul(attention_weights, history_embeds.unsqueeze(0))
+        # weighted_sum: [num_attention_heads, B, N, embed_dim_combined]
+
+        # 7. Reshape and concatenate all attention head outputs
+        # Transpose to [B, num_attention_heads, N, embed_dim_combined]
+        weighted_sum = weighted_sum.transpose(0, 1)
+        # Reshape to [B, N, num_attention_heads * embed_dim_combined]
+        # This concatenates the output from each learnable query (head) for each (B, N) position.
+        weighted_sum = weighted_sum.reshape(batch_size, seq_len, self.num_attention_heads * embed_dim_combined)
+
+        # 8. Project to final embedding dimension D_emb
+        # encoded_history: [B, N, D_emb]
+        encoded_history = self.simple_attention_projection(weighted_sum)
+
         return encoded_history
 
     def encode_history_for_target(
