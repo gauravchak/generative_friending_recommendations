@@ -28,6 +28,7 @@ The most effective and flexible approach for training retrieval models in friend
 ## Architectural Insights
 
 - **Two-Tower Model**: The model produces an actor-action representation (query tower) and uses a user embedding table for targets (item tower).
+- **Modern Activation Functions**: Uses GELU activation (state-of-the-art for transformers) instead of ReLU for better performance.
 - **Flexible Forward**: The `forward` method only requires actor and action information, producing a representation suitable for retrieval.
 - **Unified Training**: The `train_forward` method supports any negative sampling strategy via the `num_rand_negs` parameter and includes temporal pretraining.
 - **Variable-Length Histories**: The `history_mask` efficiently handles users with different numbers of interactions using padding and masking.
@@ -133,8 +134,15 @@ A powerful extension to the standard two-tower loss is the **temporal pretrainin
 
 ### Implementation
 - See `temporal_pretraining_loss` and `train_forward` in the codebase.
+- **Efficient Implementation**: Uses batched processing instead of loops for much better performance.
 - You can control the number of temporal examples per batch with a parameter (e.g., `K=8`).
 - The temporal loss can be combined with the main loss for joint training.
+
+### Efficiency Improvements
+The current implementation is much more efficient than the original loop-based approach:
+- **Before**: O(K) transformer forward passes (one per temporal position)
+- **After**: O(1) transformer forward pass + efficient tensor operations
+- **Speedup**: ~Kx faster for temporal pretraining
 
 ### Assumption
 - The batch must have at least K+1 valid history positions for temporal pretraining to work (see test code for details).

@@ -13,6 +13,7 @@ This part is not technically generative recommendations and can be characterized
 - Transformer-based history encoder for user interaction sequences
 - **Two training approaches**: Random negative sampling and in-batch negative sampling (IBN)
 - Variable-length history handling with attention masks
+- **Modern activation functions**: GELU activation (state-of-the-art for transformers)
 - Ranking metrics (accuracy, mean rank, MRR)
 - Complete training and inference pipeline
 - Actor-action representation for efficient retrieval
