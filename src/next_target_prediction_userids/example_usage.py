@@ -4,7 +4,7 @@ Example usage of the NextTargetPredictionUserIDs model.
 This script demonstrates how to:
 1. Initialize the model
 2. Create sample training data
-3. Train the model with the train_forward method
+3. Train the model with the train_forward method (includes temporal pretraining)
 4. Make predictions
 
 To run this example, you'll need PyTorch installed:
@@ -60,9 +60,11 @@ def main():
     )
     
     # Simulate variable-length histories by masking some entries
+    # This demonstrates how to handle users with different numbers of interactions
+    # The mask uses 1 for valid entries and 0 for padding
     for i in range(model.batch_size):
         valid_length = torch.randint(20, HISTORY_LENGTH, (1,)).item()
-        batch.actor_history_mask[i, valid_length:] = 0
+        batch.actor_history_mask[i, valid_length:] = 0  # Mask out padding positions
     
     # Test forward pass
     print("\nTesting forward pass...")
@@ -83,16 +85,16 @@ def main():
     model.train()
     
     # Forward pass with training objectives - using pure in-batch negative sampling
-    print("Using pure in-batch negative sampling (K=0):")
-    results = model.train_forward(batch, K=0)
+    print("Using pure in-batch negative sampling (num_rand_negs=0):")
+    results = model.train_forward_with_target(batch, num_rand_negs=0)
     
     print("Training Results (Pure In-Batch Negative Sampling):")
     for key, value in results.items():
         print(f"  {key}: {value.item():.4f}")
     
     # Forward pass with mixed negative sampling
-    print("\nUsing mixed negative sampling (K=5):")
-    results_mixed = model.train_forward(batch, K=5)
+    print("\nUsing mixed negative sampling (num_rand_negs=5):")
+    results_mixed = model.train_forward_with_target(batch, num_rand_negs=5)
     
     print("Training Results (Mixed Negative Sampling):")
     for key, value in results_mixed.items():
@@ -109,18 +111,19 @@ def main():
         
         for batch_idx in range(num_batches):
             # Create a new batch (in reality, you'd load from your dataset)
+            # Note: In practice, you'd create proper history_masks based on actual user interaction lengths
             batch = NextTargetPredictionBatch(
                 actor_id=torch.randint(0, NUM_USERS, (model.batch_size,), device=model.device),
                 actor_history_actions=torch.randint(0, NUM_ACTIONS, (model.batch_size, HISTORY_LENGTH), device=model.device),
                 actor_history_targets=torch.randint(0, NUM_USERS, (model.batch_size, HISTORY_LENGTH), device=model.device),
-                actor_history_mask=torch.ones(model.batch_size, HISTORY_LENGTH, device=model.device),
+                actor_history_mask=torch.ones(model.batch_size, HISTORY_LENGTH, device=model.device),  # All valid for simplicity
                 example_action=torch.randint(0, NUM_ACTIONS, (model.batch_size,), device=model.device),
                 example_target=torch.randint(0, NUM_USERS, (model.batch_size,), device=model.device),
             )
             
             # Training step with mixed negative sampling
             optimizer.zero_grad()
-            results = model.train_forward(batch, K=3)  # Use 3 additional random negatives
+            results = model.train_forward_with_target(batch, num_rand_negs=3)  # Use 3 additional random negatives
             loss = results['loss']
             loss.backward()
             optimizer.step()

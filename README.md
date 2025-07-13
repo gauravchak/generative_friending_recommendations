@@ -36,7 +36,7 @@ The implementation provides a solid foundation for the subsequent sections on So
 This will assume the existence of a Social Tokenized UserID (STU) a 3 token UserID for each user. This will change training from in batch negatives to next token prediction. Just to keep the leap short this section will only focus on training.
 
 ## Inference of next target prediction using STU (Pytorch implementation)
-Here we learn to add inference for Social Tokenized UserID (STU) based prediction. The model trained on UserIDs is inferred using K-nearest-neighbors.
+Here we learn to add inference for Social Tokenized UserID (STU) based prediction. The model trained on UserIDs is inferred using k-nearest-neighbors.
 
 ## In model clustering as an intermediate step
 Here we pose the insight to the reader that in the context of friending recommendations, an intermediate step that might still provide a lot of value is the ability to train a clustering step during next target prediction and use that for next token prediction. Since the clusters have a lower cardinality, the resulting cluster embedding table is smaller, and training a loss from that will lead to less overfitting concerns.
