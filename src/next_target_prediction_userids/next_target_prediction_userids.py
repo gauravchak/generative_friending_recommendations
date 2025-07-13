@@ -107,16 +107,23 @@ class NextTargetPredictionUserIDs(nn.Module):
             num_layers=2,
         )
         
+        # History projection layer - reduces D_emb * 2 to D_emb
+        self.history_projection = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim, device=device),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        
         # Actor representation network
         self.actor_projection = nn.Sequential(
-            nn.Linear(embedding_dim + embedding_dim * 2 + embedding_dim * 2, hidden_dim, device=device),  # actor_id + history_repr + latent_cross
+            nn.Linear(embedding_dim + embedding_dim + embedding_dim, hidden_dim, device=device),  # actor_id + history_repr + latent_cross
             nn.GELU(),  # To use SwiGLU instead, replace with: SwiGLU(hidden_dim, hidden_dim, device=device)
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, embedding_dim, device=device),
         )
         
         # Actor projection for latent cross (projects actor_embeds to match history_repr dimension)
-        self.actor_projection_for_cross = nn.Linear(embedding_dim, embedding_dim * 2, device=device)
+        self.actor_projection_for_cross = nn.Linear(embedding_dim, embedding_dim, device=device)
         
         # Target prediction network
         self.get_actor_action_repr = nn.Sequential(
@@ -148,6 +155,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         2. Concatenating them
         3. Applying transformer encoding with masking
         4. Mean pooling over valid tokens
+        5. Projecting to D_emb dimension
         
         Args:
             history_actions: [B, N] - action IDs (padded with zeros for short histories)
@@ -157,7 +165,7 @@ class NextTargetPredictionUserIDs(nn.Module):
                 in a sequence of length 16 (valid entries at the end)
             
         Returns:
-            torch.Tensor: [B, D_emb * 2] - encoded history representation
+            torch.Tensor: [B, D_emb] - encoded history representation
         """
         # Get embeddings for each history item
         action_embeds = self.action_embeddings(history_actions)  # [B, N, D_emb] - action embeddings
@@ -192,6 +200,9 @@ class NextTargetPredictionUserIDs(nn.Module):
         
         history_repr = masked_encoded.sum(dim=1) / valid_tokens  # [B, D_emb * 2]
         
+        # Project to D_emb dimension
+        history_repr = self.history_projection(history_repr)  # [B, D_emb]
+        
         return history_repr
 
     def encode_history(
@@ -205,14 +216,15 @@ class NextTargetPredictionUserIDs(nn.Module):
         
         This method handles variable-length histories using a mask. The transformer
         will only attend to valid (masked) positions, and the final representation
-        is computed as a mean over valid tokens only.
+        is computed as a mean over valid tokens only, then projected to D_emb.
         
         Data Flow:
         1. Each history item: [action_id, target_user_id] 
         2. Embeddings: [action_embedding(D_emb), target_user_embedding(D_emb)]
         3. Concatenated: [action_features + target_features] = [D_emb * 2]
         4. Transformer processes sequence of these concatenated embeddings
-        5. Output: Mean-pooled representation of the entire interaction history
+        5. Mean pooling over valid tokens: [D_emb * 2]
+        6. Projection to D_emb dimension: [D_emb]
         
         Args:
             history_actions: [B, N] - action IDs (padded with zeros for short histories)
@@ -222,7 +234,7 @@ class NextTargetPredictionUserIDs(nn.Module):
                 in a sequence of length 16 (valid entries at the end)
             
         Returns:
-            torch.Tensor: [B, D_emb * 2] - encoded history representation
+            torch.Tensor: [B, D_emb] - encoded history representation
         """
         return self._encode_history_with_transformer(history_actions, history_targets, history_mask)
     
@@ -261,14 +273,14 @@ class NextTargetPredictionUserIDs(nn.Module):
         
         # Combine actor and history representations with latent cross interaction
         # Inspired by Google's "latent cross" approach: concatenate + elementwise product
-        actor_history_concat = torch.cat([actor_embeds, history_repr], dim=-1)  # [B, D_emb + D_emb*2]
+        actor_history_concat = torch.cat([actor_embeds, history_repr], dim=-1)  # [B, D_emb + D_emb]
         
         # Project actor embeddings to match history representation dimension for latent cross
-        actor_embeds_projected = self.actor_projection_for_cross(actor_embeds)  # [B, D_emb * 2]
-        actor_history_cross = actor_embeds_projected * history_repr  # [B, D_emb * 2] - elementwise product
+        actor_embeds_projected = self.actor_projection_for_cross(actor_embeds)  # [B, D_emb]
+        actor_history_cross = actor_embeds_projected * history_repr  # [B, D_emb] - elementwise product
         
         # Concatenate all three: actor_embeds, history_repr, and their elementwise product
-        actor_history_input = torch.cat([actor_history_concat, actor_history_cross], dim=-1)  # [B, D_emb + D_emb*2 + D_emb*2]
+        actor_history_input = torch.cat([actor_history_concat, actor_history_cross], dim=-1)  # [B, D_emb + D_emb + D_emb]
         actor_repr = self.actor_projection(actor_history_input)  # [B, D_emb]
         
         # Get action embeddings
@@ -433,6 +445,9 @@ class NextTargetPredictionUserIDs(nn.Module):
             history_embeds,
             src_key_padding_mask=(batch.actor_history_mask == 0).bool()  # Padding mask
         )  # [B, N, D_emb * 2]
+        
+        # Project to D_emb dimension for temporal pretraining
+        encoded_history = self.history_projection(encoded_history)  # [B, N, D_emb]
 
         # Ensure we have enough history for temporal examples
         if history_length < num_temporal_examples + 1:
@@ -455,7 +470,7 @@ class NextTargetPredictionUserIDs(nn.Module):
             }
         
         # Extract representations at temporal positions
-        temporal_reprs = encoded_history[:, temporal_positions]  # [B, num_temporal, D_emb * 2]
+        temporal_reprs = encoded_history[:, temporal_positions]  # [B, num_temporal, D_emb]
         temporal_actions = batch.actor_history_actions[:, [p+1 for p in temporal_positions]]  # [B, num_temporal]
         temporal_targets = batch.actor_history_targets[:, [p+1 for p in temporal_positions]]  # [B, num_temporal]
         temporal_valid = batch.actor_history_mask[:, [p+1 for p in temporal_positions]]  # [B, num_temporal]
@@ -469,15 +484,15 @@ class NextTargetPredictionUserIDs(nn.Module):
         
         # Combine actor and temporal history representations with latent cross interaction
         # Inspired by Google's "latent cross" approach: concatenate + elementwise product
-        actor_temporal_concat = torch.cat([actor_embeds_expanded, temporal_reprs], dim=-1)  # [B, num_temporal, D_emb + D_emb*2]
+        actor_temporal_concat = torch.cat([actor_embeds_expanded, temporal_reprs], dim=-1)  # [B, num_temporal, D_emb + D_emb]
         
         # Project actor embeddings to match temporal representation dimension for latent cross
-        actor_embeds_projected = self.actor_projection_for_cross(actor_embeds)  # [B, D_emb * 2]
-        actor_embeds_projected_expanded = actor_embeds_projected.unsqueeze(1).expand(-1, len(temporal_positions), -1)  # [B, num_temporal, D_emb * 2]
-        actor_temporal_cross = actor_embeds_projected_expanded * temporal_reprs  # [B, num_temporal, D_emb * 2] - elementwise product
+        actor_embeds_projected = self.actor_projection_for_cross(actor_embeds)  # [B, D_emb]
+        actor_embeds_projected_expanded = actor_embeds_projected.unsqueeze(1).expand(-1, len(temporal_positions), -1)  # [B, num_temporal, D_emb]
+        actor_temporal_cross = actor_embeds_projected_expanded * temporal_reprs  # [B, num_temporal, D_emb] - elementwise product
         
         # Concatenate all three: actor_embeds, temporal_reprs, and their elementwise product
-        actor_temporal_input = torch.cat([actor_temporal_concat, actor_temporal_cross], dim=-1)  # [B, num_temporal, D_emb + D_emb*2 + D_emb*2]
+        actor_temporal_input = torch.cat([actor_temporal_concat, actor_temporal_cross], dim=-1)  # [B, num_temporal, D_emb + D_emb + D_emb]
         actor_reprs = self.actor_projection(actor_temporal_input)  # [B, num_temporal, D_emb]
         
         # Get action embeddings for temporal actions

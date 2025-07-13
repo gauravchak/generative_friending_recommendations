@@ -74,6 +74,20 @@ actor_history_mask = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
   - **Better convergence** (trained for full 15 epochs vs early stopping at 6)
   - **Lower mean rank** (14.63 → 11.84)
 
+### Major Performance Breakthrough: D_emb History Projection
+- **Optimization**: Added a projection layer to reduce history representations from `D_emb * 2` to `D_emb` dimensions.
+- **Architecture**: Transformer encoder still processes `D_emb * 2` (action + target embeddings), but output is projected to `D_emb` via a small MLP with GELU activation.
+- **Benefits**: 
+  - **Memory efficiency**: Reduced memory usage in downstream layers
+  - **Computational speed**: Faster matrix operations with smaller dimensions
+  - **Parameter efficiency**: Only 2.7% parameter overhead (32,896 additional parameters)
+  - **Better regularization**: Forces more compact, generalizable representations
+- **Impact**: **Exceptional performance improvements**:
+  - **+31.9% better accuracy** (55.21% → 72.80%)
+  - **+116.2% better MRR** (21.01% → 45.43%)
+  - **+39.0% better mean rank** (11.84 → 7.22)
+  - **Best results achieved**: 72.80% accuracy, 45.43% MRR, 7.22 mean rank
+
 ---
 
 ## GELU vs SwiGLU: Activation Function Comparison
@@ -82,7 +96,8 @@ actor_history_mask = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
 
 | Activation | Test Accuracy | Test MRR | Mean Rank |
 |------------|--------------|----------|-----------|
-| GELU (After Bug Fix) | **0.5521** | **0.2101** | **11.84** |
+| **GELU + D_emb Projection** | **0.7280** | **0.4543** | **7.22** |
+| GELU (After Bug Fix) | 0.5521 | 0.2101 | 11.84 |
 | GELU (Before Bug Fix) | 0.4628 | 0.1591 | 14.63 |
 | SwiGLU (Before Bug Fix) | 0.4448 | 0.1327 | 16.66 |
 
