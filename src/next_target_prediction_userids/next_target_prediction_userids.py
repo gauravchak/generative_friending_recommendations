@@ -63,6 +63,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         dropout: float = 0.1,
         batch_size: int = 32,
         device: str = "cpu",
+        history_encoder_type: str = "transformer",
     ):
         """
         Initialize the next target prediction model.
@@ -87,6 +88,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         self.num_negatives = num_negatives
         self.batch_size = batch_size
         self.device = device
+        self.history_encoder_type = history_encoder_type
         
         # User and action embeddings
         self.user_embeddings = nn.Embedding(num_users, embedding_dim, device=device)
@@ -110,6 +112,15 @@ class NextTargetPredictionUserIDs(nn.Module):
         # History projection layer - reduces D_emb * 2 to D_emb
         self.history_projection = nn.Sequential(
             nn.Linear(embedding_dim * 2, embedding_dim, device=device),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        
+        # Simple attention components (for history_encoder_type="simple_attention")
+        self.num_attention_heads = 2  # K=2 learnable query vectors
+        self.learnable_queries = nn.Parameter(torch.randn(self.num_attention_heads, embedding_dim * 2, device=device))
+        self.simple_attention_projection = nn.Sequential(
+            nn.Linear(self.num_attention_heads * embedding_dim * 2, embedding_dim, device=device),
             nn.GELU(),
             nn.Dropout(dropout),
         )
@@ -200,6 +211,74 @@ class NextTargetPredictionUserIDs(nn.Module):
         
         return encoded_history
 
+    def _encode_history_with_simple_attention(
+        self,
+        history_actions: torch.Tensor,
+        history_targets: torch.Tensor,
+        history_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Encode history using simple pooled multi-head attention.
+        
+        This method uses K=2 learnable query vectors to compute attention over
+        the history sequence. For each position i, it attends to positions 0 to i
+        (causal attention) and produces a weighted representation.
+        
+        Args:
+            history_actions: [B, N] - action IDs (padded with zeros for short histories)
+            history_targets: [B, N] - target user IDs (padded with zeros for short histories)
+            history_mask: [B, N] - validity mask where 1=valid, 0=padding
+            
+        Returns:
+            torch.Tensor: [B, N, D_emb] - full sequence encoded history
+        """
+        # Get embeddings for each history item
+        action_embeds = self.action_embeddings(history_actions)  # [B, N, D_emb]
+        target_embeds = self.user_embeddings(history_targets)    # [B, N, D_emb]
+        
+        # Concatenate action and target embeddings
+        history_embeds = torch.cat([action_embeds, target_embeds], dim=-1)  # [B, N, D_emb * 2]
+        
+        batch_size, seq_len, embed_dim = history_embeds.shape
+        
+        # Check if all tokens are masked
+        attention_mask = (history_mask == 0).bool()  # [B, N]
+        if attention_mask.all():
+            # If all tokens are masked, pass a zero tensor through the projection layer
+            zeros_input = torch.zeros(batch_size, seq_len, self.num_attention_heads * embed_dim, device=self.device)
+            return self.simple_attention_projection(zeros_input)
+        
+        # Compute attention scores: [K, B, N, N]
+        # queries: [K, D_emb * 2], history_embeds: [B, N, D_emb * 2]
+        queries = self.learnable_queries.unsqueeze(1).unsqueeze(1)  # [K, 1, 1, D_emb * 2]
+        attention_scores = torch.matmul(queries, history_embeds.unsqueeze(0).transpose(-2, -1))  # [K, B, N, N]
+        attention_scores = attention_scores / (embed_dim ** 0.5)  # Scale by sqrt(d_k)
+        
+        # Create causal mask: upper triangular matrix (True for positions to mask)
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=self.device), diagonal=1).bool()  # [N, N]
+        
+        # Apply causal mask and padding mask
+        attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))  # [K, B, N, N]
+        attention_scores = attention_scores.masked_fill(attention_mask.unsqueeze(0).unsqueeze(-1), float('-inf'))  # [K, B, N, N]
+        
+        # Apply softmax to get attention weights (with numerical stability)
+        attention_weights = torch.softmax(attention_scores, dim=-1)  # [K, B, N, N]
+        
+        # Replace NaN values with zeros
+        attention_weights = torch.nan_to_num(attention_weights, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Apply attention weights to get weighted representations
+        weighted_sum = torch.matmul(attention_weights, history_embeds.unsqueeze(0))  # [K, B, N, D_emb * 2]
+        
+        # Reshape and concatenate all attention heads
+        weighted_sum = weighted_sum.transpose(0, 1)  # [B, K, N, D_emb * 2]
+        weighted_sum = weighted_sum.reshape(batch_size, seq_len, self.num_attention_heads * embed_dim)  # [B, N, K * D_emb * 2]
+        
+        # Project to final embedding dimension
+        encoded_history = self.simple_attention_projection(weighted_sum)  # [B, N, D_emb]
+        
+        return encoded_history
+
     def encode_history_for_target(
         self,
         history_actions: torch.Tensor,
@@ -231,8 +310,11 @@ class NextTargetPredictionUserIDs(nn.Module):
         Returns:
             torch.Tensor: [B, D_emb] - encoded history representation for target prediction
         """
-        # Get full sequence from shared method
-        encoded_history = self._encode_history_with_transformer(history_actions, history_targets, history_mask)  # [B, N, D_emb]
+        # Get full sequence from appropriate encoding method
+        if self.history_encoder_type == "simple_attention":
+            encoded_history = self._encode_history_with_simple_attention(history_actions, history_targets, history_mask)  # [B, N, D_emb]
+        else:
+            encoded_history = self._encode_history_with_transformer(history_actions, history_targets, history_mask)  # [B, N, D_emb]
         
         # Mean pooling over valid tokens
         masked_encoded = encoded_history * history_mask.unsqueeze(-1)  # [B, N, D_emb]
@@ -345,8 +427,8 @@ class NextTargetPredictionUserIDs(nn.Module):
         if num_rand_negs > 0:
             # Add num_rand_negs additional random negative targets
             random_neg_targets = torch.randint(
-                0, self.num_users, 
-                (batch_size, num_rand_negs), 
+                0, self.num_users,
+                (batch_size, num_rand_negs),
                 device=self.device
             )  # [B, num_rand_negs]
             
@@ -434,12 +516,19 @@ class NextTargetPredictionUserIDs(nn.Module):
         batch_size = batch.actor_history_actions.size(0)
         history_length = batch.actor_history_actions.size(1)
 
-        # Use shared method to get full sequence for temporal pretraining
-        encoded_history = self._encode_history_with_transformer(
-            batch.actor_history_actions,
-            batch.actor_history_targets,
-            batch.actor_history_mask
-        )  # [B, N, D_emb]
+        # Use appropriate method to get full sequence for temporal pretraining
+        if self.history_encoder_type == "simple_attention":
+            encoded_history = self._encode_history_with_simple_attention(
+                batch.actor_history_actions,
+                batch.actor_history_targets,
+                batch.actor_history_mask
+            )  # [B, N, D_emb]
+        else:
+            encoded_history = self._encode_history_with_transformer(
+                batch.actor_history_actions,
+                batch.actor_history_targets,
+                batch.actor_history_mask
+            )  # [B, N, D_emb]
 
         # Ensure we have enough history for temporal examples
         if history_length < num_temporal_examples + 1:

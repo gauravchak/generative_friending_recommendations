@@ -323,6 +323,83 @@ def test_training_loop_with_temporal():
     print("✓ Training loop with temporal pretraining successful")
 
 
+def test_simple_attention():
+    """Test the simple attention history encoder."""
+    print("\nTesting simple attention history encoder...")
+    
+    # Test with simple attention
+    model_simple = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        history_encoder_type="simple_attention",
+    )
+    
+    # Test with transformer (default)
+    model_transformer = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        history_encoder_type="transformer",
+    )
+    
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model_simple)
+    
+    # Test forward pass with simple attention
+    with torch.no_grad():
+        simple_output = model_simple.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+        
+        transformer_output = model_transformer.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+    
+    print(f"Simple attention output shape: {simple_output.shape}")
+    print(f"Transformer output shape: {transformer_output.shape}")
+    
+    # Check that outputs have the same shape
+    assert simple_output.shape == transformer_output.shape, "Output shapes should match"
+    
+    # Test training with simple attention
+    results_simple = model_simple.train_forward_with_target(batch, num_rand_negs=0)
+    results_transformer = model_transformer.train_forward_with_target(batch, num_rand_negs=0)
+    
+    print("Simple attention training metrics:")
+    for key, value in results_simple.items():
+        print(f"  {key}: {value.item():.4f}")
+    
+    print("Transformer training metrics:")
+    for key, value in results_transformer.items():
+        print(f"  {key}: {value.item():.4f}")
+    
+    # Check that both models produce valid results
+    assert results_simple['loss'].dim() == 0, "Simple attention loss should be a scalar"
+    assert results_transformer['loss'].dim() == 0, "Transformer loss should be a scalar"
+    assert results_simple['loss'].item() >= 0, "Simple attention loss should be non-negative"
+    assert results_transformer['loss'].item() >= 0, "Transformer loss should be non-negative"
+    
+    print("✓ Simple attention test successful")
+
+
 def test_prediction():
     """Test the prediction functionality."""
     print("\nTesting prediction...")
@@ -378,6 +455,7 @@ def run_all_tests():
     test_temporal_pretraining()
     test_training_loop()
     test_training_loop_with_temporal()
+    test_simple_attention()
     test_prediction()
     
     print("\n" + "=" * 50)
