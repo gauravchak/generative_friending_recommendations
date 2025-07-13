@@ -1,5 +1,39 @@
 # Next Target Prediction using UserIDs (PyTorch Implementation)
 
+## Problem Statement
+
+This implementation creates a **generalizable user history-based retrieval model for next target prediction** where targets are represented in terms of their user IDs. The core idea is to learn a causal representation of:
+1. **User history** - past interactions and behaviors
+2. **Actor context** - current user's characteristics  
+3. **Action context** - what the user is trying to do
+
+This representation is then used to match against potential target users to predict who the actor will interact with next.
+
+## Next Target Prediction
+
+We've implemented a robust next target prediction system with **two history encoding approaches**:
+
+- **Simple Pooled Multi-Head Attention**: K=2 learnable query vectors with causal attention
+- **Transformer Encoder**: Full transformer with self-attention across all positions
+
+This allows readers to understand the **value of attention mechanisms** before diving into complex transformer architectures.
+
+## Architecture Overview
+
+### Core Model Components
+
+- **User & Action Embeddings**: Learn representations for users and social actions
+- **History Encoder**: Process user interaction sequences (two approaches available)
+- **Actor-Action Representation**: Combine user context with current action
+- **Retrieval System**: Find similar users using dot product similarity
+
+### Key Innovations
+
+- **Mixed Negative Sampling**: Combines in-batch and random negatives for robust training
+- **Temporal Pretraining**: Uses historical sequences to create additional training examples
+- **Variable-Length Histories**: Efficiently handles users with different interaction counts
+- **Causal Attention**: Ensures temporal consistency in sequence modeling
+
 ## The Final Insight: Mixed Negative Sampling for Robust Retrieval
 
 The most effective and flexible approach for training retrieval models in friend recommendation is **mixed negative sampling**. This method combines the strengths of in-batch negatives (realistic, hard negatives) with the diversity of random negatives (broad coverage of the embedding space). By simply tuning a parameter `num_rand_negs`, you can control the number of additional random negatives, allowing you to move seamlessly between pure in-batch, pure random, or any mix in between.
@@ -29,11 +63,10 @@ The most effective and flexible approach for training retrieval models in friend
 
 - **Two-Tower Model**: The model produces an actor-action representation (query tower) and uses a user embedding table for targets (item tower).
 - **Modern Activation Functions**: Uses GELU activation (state-of-the-art for transformers) instead of ReLU for better performance. Also implemented SwiGLU activation (state-of-the-art for transformers) with gating mechanism for better feature selection and interaction modeling.
-- **Flexible Forward**: The `forward` method only requires actor and action information, producing a representation suitable for retrieval.
+- **Unified Forward Logic**: The `forward` method uses the same history encoding logic as temporal pretraining, making next target prediction for example targets and sequence targets consistent.
 - **Unified Training**: The `train_forward` method supports any negative sampling strategy via the `num_rand_negs` parameter and includes temporal pretraining.
 - **Variable-Length Histories**: The `history_mask` efficiently handles users with different numbers of interactions using padding and masking.
 - **Masking**: All negatives (in-batch and random) are masked to avoid accidental positives.
-- **Consistent Device/Batch Handling**: All tensor creation uses the model's `self.device` and `self.batch_size` for consistency and reproducibility.
 
 ## Understanding the History Mask
 
