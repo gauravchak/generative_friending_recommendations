@@ -208,6 +208,7 @@ __marimo__/
 
 # Generated data files
 social_network_data.json
+social_network_data_4x.json
 network_stats.json
 
 # Model checkpoints and training artifacts
