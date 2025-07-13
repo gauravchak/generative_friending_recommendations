@@ -210,6 +210,7 @@ __marimo__/
 social_network_data.json
 social_network_data_4x.json
 network_stats.json
+network_stats_4x.json
 
 # Model checkpoints and training artifacts
 best_model.pth
