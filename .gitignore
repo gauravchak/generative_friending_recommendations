@@ -215,4 +215,5 @@ network_stats_4x.json
 # Model checkpoints and training artifacts
 best_model.pth
 training_history.json
+training_history_4x.json
 *.pth

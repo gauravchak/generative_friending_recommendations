@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+import argparse
 from typing import Dict, List, Tuple
 import numpy as np
 
@@ -252,7 +253,32 @@ class Trainer:
 
 def main():
     """Main training function."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train friend recommendation model')
+    parser.add_argument('--history_encoder_type', type=str, default='transformer',
+                       choices=['transformer', 'simple_attention'],
+                       help='Type of history encoder to use (default: transformer)')
+    parser.add_argument('--num_epochs', type=int, default=15,
+                       help='Number of training epochs (default: 15)')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='Batch size for training (default: 32)')
+    parser.add_argument('--learning_rate', type=float, default=0.001,
+                       help='Learning rate (default: 0.001)')
+    parser.add_argument('--embedding_dim', type=int, default=128,
+                       help='Embedding dimension (default: 128)')
+    parser.add_argument('--hidden_dim', type=int, default=256,
+                       help='Hidden dimension (default: 256)')
+    
+    args = parser.parse_args()
+    
     print("Friend Recommendation Model Training")
+    print("=" * 50)
+    print(f"History Encoder Type: {args.history_encoder_type}")
+    print(f"Number of Epochs: {args.num_epochs}")
+    print(f"Batch Size: {args.batch_size}")
+    print(f"Learning Rate: {args.learning_rate}")
+    print(f"Embedding Dimension: {args.embedding_dim}")
+    print(f"Hidden Dimension: {args.hidden_dim}")
     print("=" * 50)
     
     # Check if data exists
@@ -281,7 +307,7 @@ def main():
     print("\nCreating data loaders...")
     train_loader, val_loader, test_loader = create_data_loaders(
         data_file=data_file,
-        batch_size=32,
+        batch_size=args.batch_size,
         train_split=0.8,
         val_split=0.1,
         test_split=0.1
@@ -309,10 +335,11 @@ def main():
     model = NextTargetPredictionUserIDs(
         num_users=num_users,
         num_actions=num_actions,
-        embedding_dim=128,
-        hidden_dim=256,
-        batch_size=16,  # Match DataLoader batch size
-        device=device
+        embedding_dim=args.embedding_dim,
+        hidden_dim=args.hidden_dim,
+        batch_size=args.batch_size,
+        device=device,
+        history_encoder_type=args.history_encoder_type
     )
     
     # Initialize trainer
@@ -321,14 +348,14 @@ def main():
         train_loader=train_loader,
         val_loader=val_loader,
         test_loader=test_loader,
-        learning_rate=0.001,
+        learning_rate=args.learning_rate,
         device=device
     )
     
     # Train the model
     print(f"\nStarting training...")
     training_history = trainer.train(
-        num_epochs=15,
+        num_epochs=args.num_epochs,
         early_stopping_patience=5,
         save_path="test_data/best_model.pth"
     )

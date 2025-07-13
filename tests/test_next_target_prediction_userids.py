@@ -323,6 +323,83 @@ def test_training_loop_with_temporal():
     print("✓ Training loop with temporal pretraining successful")
 
 
+def test_simple_attention():
+    """Test the simple attention history encoder."""
+    print("\nTesting simple attention history encoder...")
+    
+    # Test with simple attention
+    model_simple = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        history_encoder_type="simple_attention",
+    )
+    
+    # Test with transformer (default)
+    model_transformer = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        history_encoder_type="transformer",
+    )
+    
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model_simple)
+    
+    # Test forward pass with simple attention
+    with torch.no_grad():
+        simple_output = model_simple.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+        
+        transformer_output = model_transformer.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+    
+    print(f"Simple attention output shape: {simple_output.shape}")
+    print(f"Transformer output shape: {transformer_output.shape}")
+    
+    # Check that outputs have the same shape
+    assert simple_output.shape == transformer_output.shape, "Output shapes should match"
+    
+    # Test training with simple attention
+    results_simple = model_simple.train_forward_with_target(batch, num_rand_negs=0)
+    results_transformer = model_transformer.train_forward_with_target(batch, num_rand_negs=0)
+    
+    print("Simple attention training metrics:")
+    for key, value in results_simple.items():
+        print(f"  {key}: {value.item():.4f}")
+    
+    print("Transformer training metrics:")
+    for key, value in results_transformer.items():
+        print(f"  {key}: {value.item():.4f}")
+    
+    # Check that both models produce valid results
+    assert results_simple['loss'].dim() == 0, "Simple attention loss should be a scalar"
+    assert results_transformer['loss'].dim() == 0, "Transformer loss should be a scalar"
+    assert results_simple['loss'].item() >= 0, "Simple attention loss should be non-negative"
+    assert results_transformer['loss'].item() >= 0, "Transformer loss should be non-negative"
+    
+    print("✓ Simple attention test successful")
+
+
 def test_prediction():
     """Test the prediction functionality."""
     print("\nTesting prediction...")
@@ -338,33 +415,416 @@ def test_prediction():
         device="cpu",
     )
     
-    # Create sample input for prediction
-    batch_size = model.batch_size
-    num_candidates = 100
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
     
-    actor_id = torch.randint(0, 1000, (batch_size,), device=model.device)
-    actor_history_actions = torch.randint(0, 10, (batch_size, 128), device=model.device)
-    actor_history_targets = torch.randint(0, 1000, (batch_size, 128), device=model.device)
-    actor_history_mask = torch.ones(batch_size, 128, device=model.device)
-    action_id = torch.randint(0, 10, (batch_size,), device=model.device)
-    candidate_targets = torch.randint(0, 1000, (batch_size, num_candidates), device=model.device)
-    
-    # Test prediction
+    # Test prediction with top-k
     with torch.no_grad():
+        # Create 2D candidate targets: [batch_size, num_candidates]
+        candidate_targets = torch.arange(1000, device=model.device).unsqueeze(0).expand(model.batch_size, -1)
+        
         top_k_scores, top_k_indices = model.predict_top_k(
-            actor_id=actor_id,
-            actor_history_actions=actor_history_actions,
-            actor_history_targets=actor_history_targets,
-            actor_history_mask=actor_history_mask,
-            action_id=action_id,
+            actor_id=batch.actor_id,
+            actor_history_actions=batch.actor_history_actions,
+            actor_history_targets=batch.actor_history_targets,
+            actor_history_mask=batch.actor_history_mask,
+            action_id=batch.example_action,
             candidate_targets=candidate_targets,
-            k=10,
+            k=10
         )
     
-    print(f"Top-k scores shape: {top_k_scores.shape}")
-    print(f"Top-k indices shape: {top_k_indices.shape}")
-    print(f"Sample top-3 scores for first example: {top_k_scores[0, :3]}")
+    print(f"Top-k prediction shapes: scores={top_k_scores.shape}, indices={top_k_indices.shape}")
+    print(f"Sample top-k scores: {top_k_scores[0]}")
+    print(f"Sample top-k indices: {top_k_indices[0]}")
+    
+    # Check that predictions are reasonable
+    assert top_k_scores.shape == (model.batch_size, 10), "Top-k scores should have shape (batch_size, k)"
+    assert top_k_indices.shape == (model.batch_size, 10), "Top-k indices should have shape (batch_size, k)"
+    assert torch.all(top_k_indices >= 0) and torch.all(top_k_indices < 1000), "Indices should be valid user IDs"
+    
     print("✓ Prediction successful")
+
+
+def test_variable_name_consistency():
+    """Test that all variable names are consistent and properly defined."""
+    print("\nTesting variable name consistency...")
+    
+    model = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+    )
+    
+    # Test that embedding_dim is properly defined and used
+    assert hasattr(model, 'embedding_dim'), "Model should have embedding_dim attribute"
+    assert model.embedding_dim == 64, "embedding_dim should match initialization"
+    
+    # Test that no undefined variables are referenced
+    assert hasattr(model, 'user_embeddings'), "Model should have user_embeddings"
+    assert hasattr(model, 'action_embeddings'), "Model should have action_embeddings"
+    assert hasattr(model, 'history_encoder'), "Model should have history_encoder"
+    
+    # Test that embeddings have correct dimensions
+    assert model.user_embeddings.embedding_dim == model.embedding_dim
+    assert model.action_embeddings.embedding_dim == model.embedding_dim
+    
+    # Test that embed_dim_combined is correctly calculated (if it exists)
+    if hasattr(model, 'embed_dim_combined'):
+        assert model.embed_dim_combined == model.embedding_dim * 2
+    else:
+        # In the reverted version, this might not be defined
+        print("Note: embed_dim_combined not defined in this version")
+    
+    print("✓ Variable name consistency test passed")
+
+
+def test_edge_cases_and_error_handling():
+    """Test handling of edge cases and error conditions."""
+    print("\nTesting edge cases and error handling...")
+    
+    model = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+    )
+    
+    # Test 1: Empty batch (all masks zero)
+    empty_batch = NextTargetPredictionBatch(
+        actor_id=torch.randint(0, 1000, (8,), device=model.device),
+        actor_history_actions=torch.zeros(8, 16, dtype=torch.long, device=model.device),
+        actor_history_targets=torch.zeros(8, 16, dtype=torch.long, device=model.device),
+        actor_history_mask=torch.zeros(8, 16, device=model.device),  # All masked
+        example_action=torch.randint(0, 10, (8,), device=model.device),
+        example_target=torch.randint(0, 1000, (8,), device=model.device),
+    )
+    
+    # Should handle empty batch gracefully
+    with torch.no_grad():
+        result = model.forward(
+            empty_batch.actor_id,
+            empty_batch.actor_history_actions,
+            empty_batch.actor_history_targets,
+            empty_batch.actor_history_mask,
+            empty_batch.example_action,
+        )
+        assert result.shape == (8, model.embedding_dim), "Empty batch should produce correct shape"
+    
+    # Test 2: Invalid user IDs (out of range)
+    invalid_batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+    invalid_batch.actor_history_targets[0, 0] = 9999  # Invalid user ID
+    
+    # Should handle invalid IDs gracefully (clamp or error)
+    try:
+        with torch.no_grad():
+            result = model.forward(
+                invalid_batch.actor_id,
+                invalid_batch.actor_history_actions,
+                invalid_batch.actor_history_targets,
+                invalid_batch.actor_history_mask,
+                invalid_batch.example_action,
+            )
+        print("✓ Model handles invalid user IDs gracefully")
+    except Exception as e:
+        print(f"✓ Model properly errors on invalid user IDs: {e}")
+    
+    # Test 3: Invalid action IDs
+    invalid_action_batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+    invalid_action_batch.actor_history_actions[0, 0] = 9999  # Invalid action ID
+    
+    try:
+        with torch.no_grad():
+            result = model.forward(
+                invalid_action_batch.actor_id,
+                invalid_action_batch.actor_history_actions,
+                invalid_action_batch.actor_history_targets,
+                invalid_action_batch.actor_history_mask,
+                invalid_action_batch.example_action,
+            )
+        print("✓ Model handles invalid action IDs gracefully")
+    except Exception as e:
+        print(f"✓ Model properly errors on invalid action IDs: {e}")
+    
+    print("✓ Edge cases and error handling test passed")
+
+
+def test_numerical_stability():
+    """Test numerical stability and handling of extreme values."""
+    print("\nTesting numerical stability...")
+    
+    model = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+    )
+    
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+    
+    # Test 1: Check for NaN/Inf in forward pass
+    with torch.no_grad():
+        result = model.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+        
+        assert not torch.isnan(result).any(), "Forward pass should not produce NaN values"
+        assert not torch.isinf(result).any(), "Forward pass should not produce Inf values"
+    
+    # Test 2: Check for NaN/Inf in training
+    results = model.train_forward_with_target(batch, num_rand_negs=2)
+    
+    assert not torch.isnan(results['loss']), "Training loss should not be NaN"
+    assert not torch.isinf(results['loss']), "Training loss should not be Inf"
+    assert results['loss'].item() >= 0, "Training loss should be non-negative"
+    
+    # Test 3: Check for NaN/Inf in temporal pretraining
+    temporal_results = model.temporal_pretraining_loss(batch, num_temporal_examples=4)
+    
+    assert not torch.isnan(temporal_results['temporal_loss']), "Temporal loss should not be NaN"
+    assert not torch.isinf(temporal_results['temporal_loss']), "Temporal loss should not be Inf"
+    assert temporal_results['temporal_loss'].item() >= 0, "Temporal loss should be non-negative"
+    
+    # Test 4: Check gradient flow
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer.zero_grad()
+    
+    results = model.train_forward_with_target(batch, num_rand_negs=2)
+    loss = results['loss']
+    loss.backward()
+    
+    # Check that gradients exist and are finite
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            assert not torch.isnan(param.grad).any(), f"Gradients for {name} should not be NaN"
+            assert not torch.isinf(param.grad).any(), f"Gradients for {name} should not be Inf"
+    
+    print("✓ Numerical stability test passed")
+
+
+def test_device_consistency():
+    """Test that all tensors are on the correct device."""
+    print("\nTesting device consistency...")
+    
+    # Test CPU
+    model_cpu = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+    )
+    
+    batch_cpu = create_sample_batch(num_users=1000, num_actions=10, model=model_cpu)
+    
+    # Check that model parameters are on CPU
+    for name, param in model_cpu.named_parameters():
+        assert param.device.type == 'cpu', f"Parameter {name} should be on CPU"
+    
+    # Check that forward pass works on CPU
+    with torch.no_grad():
+        result_cpu = model_cpu.forward(
+            batch_cpu.actor_id,
+            batch_cpu.actor_history_actions,
+            batch_cpu.actor_history_targets,
+            batch_cpu.actor_history_mask,
+            batch_cpu.example_action,
+        )
+        assert result_cpu.device.type == 'cpu', "Forward pass result should be on CPU"
+    
+    # Test MPS if available
+    if torch.backends.mps.is_available():
+        model_mps = NextTargetPredictionUserIDs(
+            num_users=1000,
+            num_actions=10,
+            embedding_dim=64,
+            hidden_dim=128,
+            num_negatives=5,
+            dropout=0.1,
+            batch_size=8,
+            device="mps",
+        )
+        
+        batch_mps = create_sample_batch(num_users=1000, num_actions=10, model=model_mps)
+        
+        # Check that model parameters are on MPS
+        for name, param in model_mps.named_parameters():
+            assert param.device.type == 'mps', f"Parameter {name} should be on MPS"
+        
+        # Check that forward pass works on MPS
+        with torch.no_grad():
+            result_mps = model_mps.forward(
+                batch_mps.actor_id,
+                batch_mps.actor_history_actions,
+                batch_mps.actor_history_targets,
+                batch_mps.actor_history_mask,
+                batch_mps.example_action,
+            )
+            assert result_mps.device.type == 'mps', "Forward pass result should be on MPS"
+        
+        print("✓ MPS device test passed")
+    else:
+        print("✓ MPS not available, skipping MPS test")
+    
+    print("✓ Device consistency test passed")
+
+
+def test_model_architecture_validation():
+    """Test that model architecture is consistent and correct."""
+    print("\nTesting model architecture validation...")
+    
+    # Test both encoder types
+    for encoder_type in ["transformer", "simple_attention"]:
+        model = NextTargetPredictionUserIDs(
+            num_users=1000,
+            num_actions=10,
+            embedding_dim=64,
+            hidden_dim=128,
+            num_negatives=5,
+            dropout=0.1,
+            batch_size=8,
+            device="cpu",
+            history_encoder_type=encoder_type,
+        )
+        
+        batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+        
+        # Test that both encoders produce same output shapes
+        with torch.no_grad():
+            result = model.forward(
+                batch.actor_id,
+                batch.actor_history_actions,
+                batch.actor_history_targets,
+                batch.actor_history_mask,
+                batch.example_action,
+            )
+            
+            assert result.shape == (model.batch_size, model.embedding_dim), \
+                f"{encoder_type} encoder should produce correct output shape"
+        
+        # Test parameter count validation
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"{encoder_type} encoder has {total_params:,} parameters")
+        
+        # Basic parameter count sanity checks
+        expected_min_params = model.num_users * model.embedding_dim + model.num_actions * model.embedding_dim
+        assert total_params > expected_min_params, f"{encoder_type} should have more than just embeddings"
+        
+        # Test that history encoder is properly initialized
+        if encoder_type == "transformer":
+            assert hasattr(model, 'history_encoder'), "Transformer model should have history_encoder"
+            assert hasattr(model, 'history_projection'), "Transformer model should have history_projection"
+        elif encoder_type == "simple_attention":
+            assert hasattr(model, 'learnable_queries'), "Simple attention model should have learnable_queries"
+            assert hasattr(model, 'simple_attention_projection'), "Simple attention model should have simple_attention_projection"
+    
+    print("✓ Model architecture validation test passed")
+
+
+def test_loss_bounds_and_metrics():
+    """Test that losses and metrics are within reasonable bounds."""
+    print("\nTesting loss bounds and metrics...")
+    
+    model = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+    )
+    
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+    
+    # Test main training loss bounds
+    results = model.train_forward_with_target(batch, num_rand_negs=2)
+    
+    assert 0 <= results['loss'].item() <= 100, "Main loss should be between 0 and 100"
+    assert 0 <= results['accuracy'].item() <= 1, "Accuracy should be between 0 and 1"
+    assert 0 <= results['mrr'].item() <= 1, "MRR should be between 0 and 1"
+    assert results['mean_rank'].item() >= 1, "Mean rank should be at least 1"
+    
+    # Test temporal pretraining loss bounds
+    temporal_results = model.temporal_pretraining_loss(batch, num_temporal_examples=4)
+    
+    assert 0 <= temporal_results['temporal_loss'].item() <= 100, "Temporal loss should be between 0 and 100"
+    assert 0 <= temporal_results['temporal_accuracy'].item() <= 1, "Temporal accuracy should be between 0 and 1"
+    assert temporal_results['num_temporal_examples'] >= 0, "Number of temporal examples should be non-negative"
+    
+    # Test combined training loss bounds
+    combined_results = model.train_forward(batch, num_rand_negs=2, temporal_weight=0.3)
+    
+    assert 0 <= combined_results['loss'].item() <= 100, "Combined loss should be between 0 and 100"
+    assert 0 <= combined_results['standard_loss'].item() <= 100, "Standard loss should be between 0 and 100"
+    assert 0 <= combined_results['temporal_loss'].item() <= 100, "Temporal loss should be between 0 and 100"
+    
+    print("✓ Loss bounds and metrics test passed")
+
+
+def test_batch_size_consistency():
+    """Test that model works with different batch sizes."""
+    print("\nTesting batch size consistency...")
+    
+    model = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+    )
+    
+    # Test different batch sizes
+    for batch_size in [1, 4, 8, 16]:
+        # Create batch with different size
+        batch = NextTargetPredictionBatch(
+            actor_id=torch.randint(0, 1000, (batch_size,), device=model.device),
+            actor_history_actions=torch.randint(0, 10, (batch_size, 16), device=model.device),
+            actor_history_targets=torch.randint(0, 1000, (batch_size, 16), device=model.device),
+            actor_history_mask=torch.ones(batch_size, 16, device=model.device),
+            example_action=torch.randint(0, 10, (batch_size,), device=model.device),
+            example_target=torch.randint(0, 1000, (batch_size,), device=model.device),
+        )
+        
+        # Test forward pass
+        with torch.no_grad():
+            result = model.forward(
+                batch.actor_id,
+                batch.actor_history_actions,
+                batch.actor_history_targets,
+                batch.actor_history_mask,
+                batch.example_action,
+            )
+            assert result.shape == (batch_size, model.embedding_dim), f"Batch size {batch_size} should work"
+        
+        # Test training
+        results = model.train_forward_with_target(batch, num_rand_negs=2)
+        assert results['loss'].shape == (), "Loss should be scalar"
+        assert not torch.isnan(results['loss']), f"Loss should not be NaN for batch size {batch_size}"
+    
+    print("✓ Batch size consistency test passed")
 
 
 def run_all_tests():
@@ -378,7 +838,15 @@ def run_all_tests():
     test_temporal_pretraining()
     test_training_loop()
     test_training_loop_with_temporal()
+    test_simple_attention()
     test_prediction()
+    test_variable_name_consistency()
+    test_edge_cases_and_error_handling()
+    test_numerical_stability()
+    test_device_consistency()
+    test_model_architecture_validation()
+    test_loss_bounds_and_metrics()
+    test_batch_size_consistency()
     
     print("\n" + "=" * 50)
     print("All tests completed successfully! ✓")
