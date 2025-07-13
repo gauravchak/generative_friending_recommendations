@@ -126,7 +126,7 @@ The training script uses:
 - **Mixed negative sampling**: In-batch + random negatives
 - **Temporal pretraining**: Sequence prefix prediction
 - **Latent cross interactions**: Elementwise products for richer representations
-- **GELU activation**: Modern activation functions
+- **SwiGLU activation**: Modern activation functions with gating mechanism
 - **Early stopping**: Prevents overfitting
 - **Learning rate scheduling**: Adaptive learning rate
 

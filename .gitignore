@@ -213,4 +213,5 @@ test_data/social_network_data.json
 # Model checkpoints and training artifacts
 test_data/best_model.pth
 test_data/training_history.json
+test_data/test_data/training_history.json
 *.pth

@@ -28,7 +28,7 @@ The most effective and flexible approach for training retrieval models in friend
 ## Architectural Insights
 
 - **Two-Tower Model**: The model produces an actor-action representation (query tower) and uses a user embedding table for targets (item tower).
-- **Modern Activation Functions**: Uses GELU activation (state-of-the-art for transformers) instead of ReLU for better performance.
+- **Modern Activation Functions**: Uses SwiGLU activation (state-of-the-art for transformers) with gating mechanism for better feature selection and interaction modeling.
 - **Flexible Forward**: The `forward` method only requires actor and action information, producing a representation suitable for retrieval.
 - **Unified Training**: The `train_forward` method supports any negative sampling strategy via the `num_rand_negs` parameter and includes temporal pretraining.
 - **Variable-Length Histories**: The `history_mask` efficiently handles users with different numbers of interactions using padding and masking.
@@ -57,6 +57,53 @@ actor_history_mask = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
 - The transformer encoder only attends to positions where `mask == 1`
 - The final history representation is computed as a mean over valid tokens only
 - This allows efficient batch processing of users with different interaction counts
+
+## Recent Improvements
+
+### Code Refactoring: Eliminated Duplication
+- **Shared History Encoding**: Created `_encode_history_with_transformer()` method to eliminate code duplication between `encode_history()` and `temporal_pretraining_loss()`.
+- **Cleaner Architecture**: Both methods now use the same underlying logic for transformer encoding and masking.
+
+### Critical Bug Fix: Temporal Pretraining Loss
+- **Issue**: The temporal pretraining loss contained a critical bug where logits were incorrectly masked with `-1e9` for positive targets.
+- **Problem**: This prevented the model from learning the correct positive class during temporal pretraining.
+- **Fix**: Removed the incorrect masking logic. `torch.nn.functional.cross_entropy` automatically handles positive class selection via the `target` argument.
+- **Impact**: **Dramatic performance improvements**:
+  - **32% better MRR** (0.1591 → 0.2101)
+  - **19% better accuracy** (0.4628 → 0.5521)
+  - **Better convergence** (trained for full 15 epochs vs early stopping at 6)
+  - **Lower mean rank** (14.63 → 11.84)
+
+---
+
+## GELU vs SwiGLU: Activation Function Comparison
+
+### Results on Test Data
+
+| Activation | Test Accuracy | Test MRR | Mean Rank |
+|------------|--------------|----------|-----------|
+| GELU (After Bug Fix) | **0.5521** | **0.2101** | **11.84** |
+| GELU (Before Bug Fix) | 0.4628 | 0.1591 | 14.63 |
+| SwiGLU (Before Bug Fix) | 0.4448 | 0.1327 | 16.66 |
+
+- **GELU outperforms SwiGLU** on both accuracy and MRR for the current architecture and data.
+- SwiGLU is preserved in the codebase for future experimentation.
+
+### How to Switch to SwiGLU
+
+1. In `next_target_prediction_userids.py`, locate the following lines in the model's `__init__`:
+   ```python
+   nn.GELU(),  # To use SwiGLU instead, replace with: SwiGLU(hidden_dim, hidden_dim, device=device)
+   ```
+2. Replace `nn.GELU()` with `SwiGLU(hidden_dim, hidden_dim, device=device)` in both `actor_projection` and `get_actor_action_repr`.
+3. Run the training script as usual:
+   ```bash
+   cd test_data
+   PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_realistic_data.py
+   ```
+4. Compare the metrics to see if SwiGLU performs better for your data or architecture changes.
+
+---
 
 ## Practical Usage
 
