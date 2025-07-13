@@ -121,7 +121,7 @@ To help readers understand the value of attention mechanisms, we've implemented 
 
 | Approach | Test Accuracy | Test MRR | Mean Rank | Model Complexity | Parameters |
 |----------|---------------|----------|-----------|------------------|------------|
-| **Simple Attention (K=2)** | 71.42% | 43.47% | 7.52 | Low | ~1.43M |
+| **Simple Attention (K=2)** | 71.42% | 43.47% | 7.52 | Low | ~600K |
 | **Transformer Encoder** | 72.86% | 43.58% | 7.59 | High | ~1.36M |
 
 **Key Insights:**

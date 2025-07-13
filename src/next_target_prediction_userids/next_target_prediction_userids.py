@@ -97,33 +97,37 @@ class NextTargetPredictionUserIDs(nn.Module):
         # History encoder - processes user's interaction history
         # Each history item is: [action_embedding, target_user_embedding] concatenated
         # So d_model = embedding_dim * 2 (action_dim + user_dim)
-        self.history_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=embedding_dim * 2,  # action_embedding + target_user_embedding
-                nhead=8,
-                dim_feedforward=hidden_dim,
-                dropout=dropout,
-                batch_first=True,
-                device=device,
-            ),
-            num_layers=2,
-        )
         
-        # History projection layer - reduces D_emb * 2 to D_emb
-        self.history_projection = nn.Sequential(
-            nn.Linear(embedding_dim * 2, embedding_dim, device=device),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        
-        # Simple attention components (for history_encoder_type="simple_attention")
-        self.num_attention_heads = 2  # K=2 learnable query vectors
-        self.learnable_queries = nn.Parameter(torch.randn(self.num_attention_heads, embedding_dim * 2, device=device))
-        self.simple_attention_projection = nn.Sequential(
-            nn.Linear(self.num_attention_heads * embedding_dim * 2, embedding_dim, device=device),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
+        if self.history_encoder_type == "transformer":
+            self.history_encoder = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d_model=embedding_dim * 2,  # action_embedding + target_user_embedding
+                    nhead=8,
+                    dim_feedforward=hidden_dim,
+                    dropout=dropout,
+                    batch_first=True,
+                    device=device,
+                ),
+                num_layers=2,
+            )
+            
+            # History projection layer - reduces D_emb * 2 to D_emb
+            self.history_projection = nn.Sequential(
+                nn.Linear(embedding_dim * 2, embedding_dim, device=device),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+        elif self.history_encoder_type == "simple_attention":
+            # Simple attention components (for history_encoder_type="simple_attention")
+            self.num_attention_heads = 2  # K=2 learnable query vectors
+            self.learnable_queries = nn.Parameter(torch.randn(self.num_attention_heads, embedding_dim * 2, device=device))
+            self.simple_attention_projection = nn.Sequential(
+                nn.Linear(self.num_attention_heads * embedding_dim * 2, embedding_dim, device=device),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+        else:
+            raise ValueError(f"Unknown history_encoder_type: {self.history_encoder_type}")
         
         # Actor representation network
         self.actor_projection = nn.Sequential(
@@ -249,7 +253,7 @@ class NextTargetPredictionUserIDs(nn.Module):
             return self.simple_attention_projection(zeros_input)
         
         # Compute attention scores: [K, B, N, N]
-        # queries: [K, D_emb * 2], history_embeds: [B, N, D_emb * 2]
+        # queries: [K, 1, 1, D_emb * 2], history_embeds: [1, B, N, D_emb * 2]
         queries = self.learnable_queries.unsqueeze(1).unsqueeze(1)  # [K, 1, 1, D_emb * 2]
         attention_scores = torch.matmul(queries, history_embeds.unsqueeze(0).transpose(-2, -1))  # [K, B, N, N]
         attention_scores = attention_scores / (embed_dim ** 0.5)  # Scale by sqrt(d_k)
