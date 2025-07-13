@@ -154,8 +154,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         1. Getting embeddings for actions and targets
         2. Concatenating them
         3. Applying transformer encoding with masking
-        4. Mean pooling over valid tokens
-        5. Projecting to D_emb dimension
+        4. Projecting to D_emb dimension
         
         Args:
             history_actions: [B, N] - action IDs (padded with zeros for short histories)
@@ -165,7 +164,7 @@ class NextTargetPredictionUserIDs(nn.Module):
                 in a sequence of length 16 (valid entries at the end)
             
         Returns:
-            torch.Tensor: [B, D_emb] - encoded history representation
+            torch.Tensor: [B, N, D_emb] - full sequence encoded history
         """
         # Get embeddings for each history item
         action_embeds = self.action_embeddings(history_actions)  # [B, N, D_emb] - action embeddings
@@ -185,7 +184,7 @@ class NextTargetPredictionUserIDs(nn.Module):
         
         if attention_mask.all():
             # If all tokens are masked, return zeros
-            return torch.zeros(history_embeds.size(0), self.embedding_dim * 2, device=history_embeds.device)
+            return torch.zeros(history_embeds.size(0), history_embeds.size(1), self.embedding_dim, device=history_embeds.device)
         
         # Apply transformer encoder
         encoded_history = self.history_encoder(
@@ -193,38 +192,31 @@ class NextTargetPredictionUserIDs(nn.Module):
             src_key_padding_mask=attention_mask
         )  # [B, N, D_emb * 2]
         
-        # Mean pooling over valid tokens
-        masked_encoded = encoded_history * history_mask.unsqueeze(-1)  # [B, N, D_emb * 2]
-        valid_tokens = history_mask.sum(dim=1, keepdim=True)  # [B, 1]
-        valid_tokens = torch.clamp(valid_tokens, min=1)  # Avoid division by zero
-        
-        history_repr = masked_encoded.sum(dim=1) / valid_tokens  # [B, D_emb * 2]
-        
         # Project to D_emb dimension
-        history_repr = self.history_projection(history_repr)  # [B, D_emb]
+        encoded_history = self.history_projection(encoded_history)  # [B, N, D_emb]
         
-        return history_repr
+        return encoded_history
 
-    def encode_history(
+    def encode_history_for_target(
         self,
         history_actions: torch.Tensor,
         history_targets: torch.Tensor,
         history_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Encode user's interaction history using transformer encoder.
+        Encode user's interaction history for target prediction using transformer encoder.
         
         This method handles variable-length histories using a mask. The transformer
         will only attend to valid (masked) positions, and the final representation
-        is computed as a mean over valid tokens only, then projected to D_emb.
+        is computed as a mean over valid tokens only.
         
         Data Flow:
         1. Each history item: [action_id, target_user_id] 
         2. Embeddings: [action_embedding(D_emb), target_user_embedding(D_emb)]
         3. Concatenated: [action_features + target_features] = [D_emb * 2]
         4. Transformer processes sequence of these concatenated embeddings
-        5. Mean pooling over valid tokens: [D_emb * 2]
-        6. Projection to D_emb dimension: [D_emb]
+        5. Projection to D_emb dimension: [B, N, D_emb]
+        6. Mean pooling over valid tokens: [B, D_emb]
         
         Args:
             history_actions: [B, N] - action IDs (padded with zeros for short histories)
@@ -234,9 +226,19 @@ class NextTargetPredictionUserIDs(nn.Module):
                 in a sequence of length 16 (valid entries at the end)
             
         Returns:
-            torch.Tensor: [B, D_emb] - encoded history representation
+            torch.Tensor: [B, D_emb] - encoded history representation for target prediction
         """
-        return self._encode_history_with_transformer(history_actions, history_targets, history_mask)
+        # Get full sequence from shared method
+        encoded_history = self._encode_history_with_transformer(history_actions, history_targets, history_mask)  # [B, N, D_emb]
+        
+        # Mean pooling over valid tokens
+        masked_encoded = encoded_history * history_mask.unsqueeze(-1)  # [B, N, D_emb]
+        valid_tokens = history_mask.sum(dim=1, keepdim=True)  # [B, 1]
+        valid_tokens = torch.clamp(valid_tokens, min=1)  # Avoid division by zero
+        
+        history_repr = masked_encoded.sum(dim=1) / valid_tokens  # [B, D_emb]
+        
+        return history_repr
     
     def forward(
         self, 
@@ -263,14 +265,14 @@ class NextTargetPredictionUserIDs(nn.Module):
         """
         # Get actor embeddings
         actor_embeds = self.user_embeddings(actor_id)  # [B, D_emb]
-        
+
         # Encode history
-        history_repr = self.encode_history(
+        history_repr = self.encode_history_for_target(
             actor_history_actions, 
             actor_history_targets, 
             actor_history_mask
-        )  # [B, D_emb * 2]
-        
+        )  # [B, D_emb]
+
         # Combine actor and history representations with latent cross interaction
         # Inspired by Google's "latent cross" approach: concatenate + elementwise product
         actor_history_concat = torch.cat([actor_embeds, history_repr], dim=-1)  # [B, D_emb + D_emb]
@@ -429,25 +431,12 @@ class NextTargetPredictionUserIDs(nn.Module):
         batch_size = batch.actor_history_actions.size(0)
         history_length = batch.actor_history_actions.size(1)
 
-        # Get embeddings for each history item
-        action_embeds = self.action_embeddings(batch.actor_history_actions)  # [B, N, D_emb]
-        target_embeds = self.user_embeddings(batch.actor_history_targets)    # [B, N, D_emb]
-        
-        # Concatenate action and target embeddings
-        history_embeds = torch.cat([action_embeds, target_embeds], dim=-1)  # [B, N, D_emb * 2]
-
-        # For temporal pretraining, we use the standard transformer encoder
-        # and extract representations at each position for temporal prediction
-        # This provides a good approximation for temporal learning
-
-        # Apply transformer encoder (standard, not causal)
-        encoded_history = self.history_encoder(
-            history_embeds,
-            src_key_padding_mask=(batch.actor_history_mask == 0).bool()  # Padding mask
-        )  # [B, N, D_emb * 2]
-        
-        # Project to D_emb dimension for temporal pretraining
-        encoded_history = self.history_projection(encoded_history)  # [B, N, D_emb]
+        # Use shared method to get full sequence for temporal pretraining
+        encoded_history = self._encode_history_with_transformer(
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask
+        )  # [B, N, D_emb]
 
         # Ensure we have enough history for temporal examples
         if history_length < num_temporal_examples + 1:
