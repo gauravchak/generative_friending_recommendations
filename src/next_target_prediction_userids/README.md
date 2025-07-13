@@ -28,7 +28,7 @@ The most effective and flexible approach for training retrieval models in friend
 ## Architectural Insights
 
 - **Two-Tower Model**: The model produces an actor-action representation (query tower) and uses a user embedding table for targets (item tower).
-- **Modern Activation Functions**: Uses SwiGLU activation (state-of-the-art for transformers) with gating mechanism for better feature selection and interaction modeling.
+- **Modern Activation Functions**: Uses GELU activation (state-of-the-art for transformers) instead of ReLU for better performance. Also implemented SwiGLU activation (state-of-the-art for transformers) with gating mechanism for better feature selection and interaction modeling.
 - **Flexible Forward**: The `forward` method only requires actor and action information, producing a representation suitable for retrieval.
 - **Unified Training**: The `train_forward` method supports any negative sampling strategy via the `num_rand_negs` parameter and includes temporal pretraining.
 - **Variable-Length Histories**: The `history_mask` efficiently handles users with different numbers of interactions using padding and masking.
