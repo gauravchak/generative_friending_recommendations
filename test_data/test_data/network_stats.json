@@ -1,0 +1,7 @@
+{
+  "num_users": 10000,
+  "num_actions": 188612,
+  "num_friendships": 8708,
+  "avg_friends_per_user": 1.7416,
+  "action_type_distribution": {
+    

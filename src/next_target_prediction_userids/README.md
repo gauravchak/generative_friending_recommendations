@@ -2,7 +2,7 @@
 
 ## The Final Insight: Mixed Negative Sampling for Robust Retrieval
 
-The most effective and flexible approach for training retrieval models in friend recommendation is **mixed negative sampling**. This method combines the strengths of in-batch negatives (realistic, hard negatives) with the diversity of random negatives (broad coverage of the embedding space). By simply tuning a parameter `K`, you can control the number of additional random negatives, allowing you to move seamlessly between pure in-batch, pure random, or any mix in between.
+The most effective and flexible approach for training retrieval models in friend recommendation is **mixed negative sampling**. This method combines the strengths of in-batch negatives (realistic, hard negatives) with the diversity of random negatives (broad coverage of the embedding space). By simply tuning a parameter `num_rand_negs`, you can control the number of additional random negatives, allowing you to move seamlessly between pure in-batch, pure random, or any mix in between.
 
 **Why does this matter?**
 - In-batch negatives are efficient and realistic, but may lack diversity in small batches or highly skewed datasets.
@@ -21,23 +21,49 @@ The most effective and flexible approach for training retrieval models in friend
    - Efficient, but can lack diversity if batch size is small or user distribution is skewed.
 
 3. **Mixed Negative Sampling (Current Approach)**
-   - Unified method: always uses in-batch negatives, and optionally adds `K` random negatives per example.
+   - Unified method: always uses in-batch negatives, and optionally adds `num_rand_negs` random negatives per example.
    - Masking ensures that no negative is accidentally a true positive (even among random negatives).
-   - Flexible: `K=0` is pure in-batch, `K>0` adds diversity, large `K` approaches pure random.
+   - Flexible: `num_rand_negs=0` is pure in-batch, `num_rand_negs>0` adds diversity, large `num_rand_negs` approaches pure random.
 
 ## Architectural Insights
 
 - **Two-Tower Model**: The model produces an actor-action representation (query tower) and uses a user embedding table for targets (item tower).
+- **Modern Activation Functions**: Uses GELU activation (state-of-the-art for transformers) instead of ReLU for better performance.
 - **Flexible Forward**: The `forward` method only requires actor and action information, producing a representation suitable for retrieval.
-- **Unified Training**: The `train_forward` method supports any negative sampling strategy via the `K` parameter.
+- **Unified Training**: The `train_forward` method supports any negative sampling strategy via the `num_rand_negs` parameter and includes temporal pretraining.
+- **Variable-Length Histories**: The `history_mask` efficiently handles users with different numbers of interactions using padding and masking.
 - **Masking**: All negatives (in-batch and random) are masked to avoid accidental positives.
 - **Consistent Device/Batch Handling**: All tensor creation uses the model's `self.device` and `self.batch_size` for consistency and reproducibility.
 
+## Understanding the History Mask
+
+The `history_mask` is crucial for handling variable-length user interaction histories efficiently:
+
+**Problem**: Users have different numbers of interactions, but neural networks need fixed-size inputs.
+
+**Solution**: Pad all histories to a fixed length `N`, then use a mask to indicate which positions are valid.
+
+**Example**: For a user with only 2 interactions in a sequence of length 16:
+```python
+# Padded data (zeros for missing interactions)
+actor_history_actions = [action1, action2, 0, 0, 0, ..., 0]  # length 16
+actor_history_targets = [user1, user2, 0, 0, 0, ..., 0]     # length 16
+
+# Mask: 1 for valid, 0 for padding (valid entries typically at the end)
+actor_history_mask = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
+```
+
+**How it works**:
+- The transformer encoder only attends to positions where `mask == 1`
+- The final history representation is computed as a mean over valid tokens only
+- This allows efficient batch processing of users with different interaction counts
+
 ## Practical Usage
 
-- **Default**: Use `train_forward(batch, K=0)` for efficient, production-grade training.
-- **Add Diversity**: Use `train_forward(batch, K=2)` or `K=5` to add a few random negatives for more robust learning.
-- **Experiment**: Tune `K` based on your dataset and observed model performance.
+- **Default**: Use `train_forward(batch, num_rand_negs=0)` for efficient, production-grade training with temporal pretraining.
+- **Add Diversity**: Use `train_forward(batch, num_rand_negs=2)` or `num_rand_negs=5` to add a few random negatives for more robust learning.
+- **Target-Only**: Use `train_forward_with_target(batch, num_rand_negs=0)` for faster training without temporal pretraining.
+- **Experiment**: Tune `num_rand_negs` based on your dataset and observed model performance.
 
 ## Example Training Loop
 
@@ -45,7 +71,7 @@ The most effective and flexible approach for training retrieval models in friend
 for epoch in range(num_epochs):
     for batch in dataloader:
         optimizer.zero_grad()
-        results = model.train_forward(batch, K=3)  # 3 random negatives per example
+        results = model.train_forward(batch, num_rand_negs=3)  # 3 random negatives per example + temporal pretraining
         loss = results['loss']
         loss.backward()
         optimizer.step()
@@ -62,13 +88,66 @@ Earlier versions of this codebase had separate methods for random and in-batch n
 
 | Approach         | Parameter | Negatives Used         | When to Use                |
 |------------------|-----------|------------------------|----------------------------|
-| In-batch only    | K=0       | Other batch examples   | Large batches, efficiency  |
-| Mixed            | K>0       | Batch + K random       | Small batches, more robust |
-| Random only      | K>>B      | K random               | Rarely, for ablation only  |
+| In-batch only    | num_rand_negs=0       | Other batch examples   | Large batches, efficiency  |
+| Mixed            | num_rand_negs>0       | Batch + num_rand_negs random       | Small batches, more robust |
+| Random only      | num_rand_negs>>B      | num_rand_negs random               | Rarely, for ablation only  |
 
 ## References
 - [Mixed Negative Sampling for Learning Two-tower Neural Networks](https://arxiv.org/abs/2203.06717) (Google Research)
 - [Practical Lessons from Deep Retrieval Systems at Scale](https://ai.googleblog.com/2020/07/retrieval-augmented-generation-for.html)
+
+## Additional Documentation
+- **[Transformer Architecture Explanation](TRANSFORMER_EXPLANATION.md)**: Detailed explanation of the transformer architecture, `d_model` parameter, and positional embedding considerations
+
+## Temporal Pretraining Loss: Sequence Prefix Prediction
+
+A powerful extension to the standard two-tower loss is the **temporal pretraining loss** (also called sequence prefix prediction or next-interaction prediction). This loss leverages the sequential nature of user histories to provide much richer training signal and better temporal modeling.
+
+### How It Works
+- For each user in the batch, instead of only using the full history to predict the next target, we use multiple prefixes of the history.
+- For each of the last K positions in the history:
+  - Use the history up to position i as the context
+  - Use the action and target at position i+1 as the prediction target
+- This creates K positive examples per batch item, not just one.
+
+### Why This is a Great Idea
+
+1. **More Training Signal**
+   - **Current:** 1 positive example per batch item
+   - **Proposed:** K positive examples per batch item (e.g., 8x more training signal)
+   - **Result:** Much more efficient use of data, faster convergence
+
+2. **Temporal Learning**
+   - **Current:** Only learns from current action → current target
+   - **Proposed:** Learns temporal patterns (action_i → target_i+1 relationships)
+   - **Result:** Better understanding of sequential user behavior
+
+3. **Self-Supervised Learning**
+   - **Current:** Requires explicit positive examples
+   - **Proposed:** Creates positive examples from the sequence itself
+   - **Result:** Can learn from unlabeled interaction sequences
+
+4. **Better History Encoding**
+   - **Current:** History encoder only trained on final prediction
+   - **Proposed:** History encoder trained on multiple temporal predictions
+   - **Result:** More robust history representations
+
+### Implementation
+- See `temporal_pretraining_loss` and `train_forward` in the codebase.
+- **Efficient Implementation**: Uses batched processing instead of loops for much better performance.
+- You can control the number of temporal examples per batch with a parameter (e.g., `K=8`).
+- The temporal loss can be combined with the main loss for joint training.
+
+### Efficiency Improvements
+The current implementation is much more efficient than the original loop-based approach:
+- **Before**: O(K) transformer forward passes (one per temporal position)
+- **After**: O(1) transformer forward pass + efficient tensor operations
+- **Speedup**: ~Kx faster for temporal pretraining
+
+### Assumption
+- The batch must have at least K+1 valid history positions for temporal pretraining to work (see test code for details).
+
+This approach is inspired by self-supervised sequence modeling in NLP and is highly effective for recommendation and behavioral modeling tasks.
 
 ---
 
