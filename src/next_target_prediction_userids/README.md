@@ -13,7 +13,7 @@ This representation is then used to match against potential target users to pred
 
 We've implemented a robust next target prediction system with **two history encoding approaches**:
 
-- **Simple Pooled Multi-Head Attention**: K=2 learnable query vectors with causal attention
+- **Pooled Multi-Head Attention**: K=2 learnable query vectors with causal attention
 - **Transformer Encoder**: Full transformer with self-attention across all positions
 
 This allows readers to understand the **value of attention mechanisms** before diving into complex transformer architectures.
@@ -151,31 +151,6 @@ model_transformer = NextTargetPredictionUserIDs(
 results_simple = model_simple.train_forward_with_target(batch, num_rand_negs=0)
 results_transformer = model_transformer.train_forward_with_target(batch, num_rand_negs=0)
 ```
-
-### Implementation Details
-
-**Simple Attention:**
-```python
-# K=2 learnable query vectors
-self.learnable_queries = nn.Parameter(torch.randn(2, embedding_dim * 2))
-
-# Causal attention computation
-attention_scores = torch.matmul(queries, history_embeds.transpose(-2, -1))
-causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
-attention_scores = attention_scores.masked_fill(causal_mask, float('-inf'))
-attention_weights = torch.softmax(attention_scores, dim=-1)
-```
-
-**Transformer:**
-```python
-# Full transformer encoder
-self.history_encoder = nn.TransformerEncoder(
-    nn.TransformerEncoderLayer(d_model=embedding_dim * 2, nhead=8),
-    num_layers=2
-)
-```
-
-This comparison demonstrates that **attention is the key innovation**, and readers can understand its value before diving into complex transformer architectures.
 
 ---
 
