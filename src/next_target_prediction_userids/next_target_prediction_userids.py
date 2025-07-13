@@ -183,8 +183,11 @@ class NextTargetPredictionUserIDs(nn.Module):
         attention_mask = (history_mask == 0).bool()  # [B, N]
         
         if attention_mask.all():
-            # If all tokens are masked, return zeros
-            return torch.zeros(history_embeds.size(0), history_embeds.size(1), self.embedding_dim, device=history_embeds.device)
+            # If all tokens are masked, pass a zero tensor through the projection layer
+            # to ensure consistent behavior (e.g., applying bias) and avoid NaNs
+            # from the transformer on fully masked inputs.
+            zeros_input = torch.zeros_like(history_embeds)
+            return self.history_projection(zeros_input)
         
         # Apply transformer encoder
         encoded_history = self.history_encoder(
