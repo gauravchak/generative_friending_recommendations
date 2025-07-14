@@ -88,11 +88,16 @@ generative_friending_recommendations/
 ├── src/next_target_prediction_userids/     # Phase 1 implementation
 │   ├── next_target_prediction_userids.py   # Two-tower model with advanced features
 │   └── README.md                           # Detailed implementation docs
+├── src/next_target_prediction_stu/         # Phase 2 implementation
+│   ├── next_target_prediction_stu.py       # STU-based autoregressive model
+│   └── README.md                           # STU model documentation
 ├── test_data/                              # Training data and scripts
 │   ├── train_friend_recommendation.py      # Unified training script
 │   ├── regular/                            # Regular dataset
 │   └── 4x/                                 # 4x larger dataset
 ├── tests/                                  # Test suite
+│   ├── test_next_target_prediction_userids.py  # Phase 1 tests
+│   └── test_next_target_prediction_stu.py      # Phase 2 tests
 └── README.md                               # This file
 ```
 
