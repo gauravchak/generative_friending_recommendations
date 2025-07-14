@@ -258,6 +258,11 @@ def main():
     parser.add_argument('--history_encoder_type', type=str, default='transformer',
                        choices=['transformer', 'simple_attention'],
                        help='Type of history encoder to use (default: transformer)')
+    parser.add_argument('--interaction_type', type=str, default='mlp',
+                       choices=['mlp', 'moe'],
+                       help='Type of interaction modeling to use (default: mlp)')
+    parser.add_argument('--num_experts', type=int, default=4,
+                       help='Number of experts for MoE (default: 4)')
     parser.add_argument('--num_epochs', type=int, default=15,
                        help='Number of training epochs (default: 15)')
     parser.add_argument('--batch_size', type=int, default=32,
@@ -274,6 +279,9 @@ def main():
     print("Friend Recommendation Model Training")
     print("=" * 50)
     print(f"History Encoder Type: {args.history_encoder_type}")
+    print(f"Interaction Type: {args.interaction_type}")
+    if args.interaction_type == 'moe':
+        print(f"Number of Experts: {args.num_experts}")
     print(f"Number of Epochs: {args.num_epochs}")
     print(f"Batch Size: {args.batch_size}")
     print(f"Learning Rate: {args.learning_rate}")
@@ -339,7 +347,9 @@ def main():
         hidden_dim=args.hidden_dim,
         batch_size=args.batch_size,
         device=device,
-        history_encoder_type=args.history_encoder_type
+        history_encoder_type=args.history_encoder_type,
+        interaction_type=args.interaction_type,
+        num_experts=args.num_experts
     )
     
     # Initialize trainer
