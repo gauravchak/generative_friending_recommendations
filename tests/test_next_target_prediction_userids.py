@@ -660,8 +660,9 @@ def test_device_consistency():
             num_negatives=5,
             dropout=0.1,
             batch_size=8,
-            device="mps",
         )
+        model_mps = model_mps.to("mps")
+        model_mps.device = "mps"
         
         batch_mps = create_sample_batch(num_users=1000, num_actions=10, model=model_mps)
         
@@ -827,6 +828,314 @@ def test_batch_size_consistency():
     print("✓ Batch size consistency test passed")
 
 
+def test_moe_interaction_type():
+    """Test Mixture of Experts (MoE) interaction type functionality."""
+    print("\nTesting MoE interaction type...")
+    
+    # Test MoE initialization with different expert counts
+    for num_experts in [2, 4, 8]:
+        model = NextTargetPredictionUserIDs(
+            num_users=1000,
+            num_actions=10,
+            embedding_dim=64,
+            hidden_dim=128,
+            num_negatives=5,
+            dropout=0.1,
+            batch_size=8,
+            device="cpu",
+            interaction_type="moe",
+            num_experts=num_experts,
+        )
+        
+        # Verify MoE components are properly initialized
+        assert hasattr(model, 'interaction_network'), "MoE model should have interaction_network"
+        assert hasattr(model.interaction_network, 'experts'), "MoE should have experts"
+        assert hasattr(model.interaction_network, 'gate'), "MoE should have gate"
+        assert len(model.interaction_network.experts) == num_experts, f"Should have {num_experts} experts"
+        
+        # Test forward pass
+        batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+        with torch.no_grad():
+            result = model.forward(
+                batch.actor_id,
+                batch.actor_history_actions,
+                batch.actor_history_targets,
+                batch.actor_history_mask,
+                batch.example_action,
+            )
+            assert result.shape == (model.batch_size, model.embedding_dim), "MoE output should have correct shape"
+        
+        # Test training
+        results = model.train_forward_with_target(batch, num_rand_negs=2)
+        assert not torch.isnan(results['loss']), "MoE training should not produce NaN loss"
+        assert results['loss'].item() >= 0, "MoE loss should be non-negative"
+        
+        print(f"✓ MoE with {num_experts} experts works correctly")
+    
+    print("✓ MoE interaction type test passed")
+
+
+def test_moe_vs_mlp_comparison():
+    """Test that MoE and MLP interaction types produce different but valid results."""
+    print("\nTesting MoE vs MLP comparison...")
+    
+    # Create models with same parameters but different interaction types
+    model_mlp = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        interaction_type="mlp",
+    )
+    
+    model_moe = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        interaction_type="moe",
+        num_experts=4,
+    )
+    
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model_mlp)
+    
+    # Test forward pass with both models
+    with torch.no_grad():
+        result_mlp = model_mlp.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+        
+        result_moe = model_moe.forward(
+            batch.actor_id,
+            batch.actor_history_actions,
+            batch.actor_history_targets,
+            batch.actor_history_mask,
+            batch.example_action,
+        )
+        
+        # Both should have same shape
+        assert result_mlp.shape == result_moe.shape, "MLP and MoE should produce same output shape"
+        
+        # Results should be different (different architectures)
+        assert not torch.allclose(result_mlp, result_moe, atol=1e-6), "MLP and MoE should produce different results"
+        
+        # Both should be finite
+        assert torch.isfinite(result_mlp).all(), "MLP output should be finite"
+        assert torch.isfinite(result_moe).all(), "MoE output should be finite"
+    
+    # Test training with both models
+    results_mlp = model_mlp.train_forward_with_target(batch, num_rand_negs=2)
+    results_moe = model_moe.train_forward_with_target(batch, num_rand_negs=2)
+    
+    # Both should produce valid losses
+    assert not torch.isnan(results_mlp['loss']), "MLP training should not produce NaN loss"
+    assert not torch.isnan(results_moe['loss']), "MoE training should not produce NaN loss"
+    assert results_mlp['loss'].item() >= 0, "MLP loss should be non-negative"
+    assert results_moe['loss'].item() >= 0, "MoE loss should be non-negative"
+    
+    print("✓ MoE vs MLP comparison test passed")
+
+
+def test_moe_gating_behavior():
+    """Test that MoE gating network produces valid probability distributions."""
+    print("\nTesting MoE gating behavior...")
+    
+    model = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        interaction_type="moe",
+        num_experts=4,
+    )
+    
+    batch = create_sample_batch(num_users=1000, num_actions=10, model=model)
+    
+    # Get the unified representation that goes into MoE
+    actor_embeds = model.user_embeddings(batch.actor_id)
+    action_embeds = model.action_embeddings(batch.example_action)
+    history_repr = model.encode_history_for_target(
+        batch.actor_history_actions,
+        batch.actor_history_targets,
+        batch.actor_history_mask
+    )
+    
+    # Create unified representation
+    actor_history_interaction = actor_embeds * history_repr
+    actor_action_interaction = actor_embeds * action_embeds
+    
+    unified_repr = torch.cat([
+        actor_embeds,
+        history_repr,
+        action_embeds,
+        actor_history_interaction,
+        actor_action_interaction
+    ], dim=-1)  # [B, D_emb * 5]
+    
+    # Test gating network directly
+    with torch.no_grad():
+        gate_weights = model.interaction_network.gate(unified_repr)  # [B, num_experts]
+        
+        # Check that gate weights sum to 1 for each example
+        gate_sums = gate_weights.sum(dim=1)
+        assert torch.allclose(gate_sums, torch.ones_like(gate_sums), atol=1e-6), "Gate weights should sum to 1"
+        
+        # Check that all gate weights are non-negative
+        assert (gate_weights >= 0).all(), "Gate weights should be non-negative"
+        
+        # Check that gate weights are finite
+        assert torch.isfinite(gate_weights).all(), "Gate weights should be finite"
+        
+        print(f"Gate weights shape: {gate_weights.shape}")
+        print(f"Sample gate weights: {gate_weights[0]}")
+        print(f"Gate weights sum: {gate_weights.sum(dim=1)}")
+    
+    print("✓ MoE gating behavior test passed")
+
+
+def test_moe_device_consistency():
+    """Test that MoE works correctly on different devices."""
+    print("\nTesting MoE device consistency...")
+    
+    # Test CPU
+    model_cpu = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        interaction_type="moe",
+        num_experts=4,
+    )
+    
+    batch_cpu = create_sample_batch(num_users=1000, num_actions=10, model=model_cpu)
+    
+    # Check that MoE parameters are on CPU
+    for name, param in model_cpu.interaction_network.named_parameters():
+        assert param.device.type == 'cpu', f"MoE parameter {name} should be on CPU"
+    
+    # Test forward pass on CPU
+    with torch.no_grad():
+        result_cpu = model_cpu.forward(
+            batch_cpu.actor_id,
+            batch_cpu.actor_history_actions,
+            batch_cpu.actor_history_targets,
+            batch_cpu.actor_history_mask,
+            batch_cpu.example_action,
+        )
+        assert result_cpu.device.type == 'cpu', "MoE forward pass result should be on CPU"
+    
+    # Test MPS if available
+    if torch.backends.mps.is_available():
+        model_mps = NextTargetPredictionUserIDs(
+            num_users=1000,
+            num_actions=10,
+            embedding_dim=64,
+            hidden_dim=128,
+            num_negatives=5,
+            dropout=0.1,
+            batch_size=8,
+            interaction_type="moe",
+            num_experts=4,
+        )
+        model_mps = model_mps.to("mps")
+        model_mps.device = "mps"
+        
+        batch_mps = create_sample_batch(num_users=1000, num_actions=10, model=model_mps)
+        
+        # Check that MoE parameters are on MPS
+        for name, param in model_mps.interaction_network.named_parameters():
+            assert param.device.type == 'mps', f"MoE parameter {name} should be on MPS"
+        
+        # Test forward pass on MPS
+        with torch.no_grad():
+            result_mps = model_mps.forward(
+                batch_mps.actor_id,
+                batch_mps.actor_history_actions,
+                batch_mps.actor_history_targets,
+                batch_mps.actor_history_mask,
+                batch_mps.example_action,
+            )
+            assert result_mps.device.type == 'mps', "MoE forward pass result should be on MPS"
+        
+        print("✓ MoE MPS device test passed")
+    else:
+        print("✓ MPS not available, skipping MoE MPS test")
+    
+    print("✓ MoE device consistency test passed")
+
+
+def test_moe_parameter_count():
+    """Test that MoE has expected parameter count compared to MLP."""
+    print("\nTesting MoE parameter count...")
+    
+    # MLP model
+    model_mlp = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        interaction_type="mlp",
+    )
+    
+    # MoE model with 4 experts
+    model_moe = NextTargetPredictionUserIDs(
+        num_users=1000,
+        num_actions=10,
+        embedding_dim=64,
+        hidden_dim=128,
+        num_negatives=5,
+        dropout=0.1,
+        batch_size=8,
+        device="cpu",
+        interaction_type="moe",
+        num_experts=4,
+    )
+    
+    # Count parameters in interaction networks
+    mlp_params = sum(p.numel() for p in model_mlp.interaction_network.parameters())
+    moe_params = sum(p.numel() for p in model_moe.interaction_network.parameters())
+    
+    print(f"MLP interaction network parameters: {mlp_params:,}")
+    print(f"MoE interaction network parameters: {moe_params:,}")
+    
+    # MoE should have more parameters than MLP (due to multiple experts)
+    assert moe_params > mlp_params, "MoE should have more parameters than MLP"
+    
+    # MoE should have roughly 4x more parameters (4 experts + gating network)
+    expected_ratio = 4.0  # 4 experts + gating network
+    actual_ratio = moe_params / mlp_params
+    print(f"Parameter ratio (MoE/MLP): {actual_ratio:.2f}")
+    
+    # Allow some flexibility in the ratio (gating network adds overhead)
+    assert 3.0 <= actual_ratio <= 5.0, f"MoE should have roughly 4x parameters, got {actual_ratio:.2f}x"
+    
+    print("✓ MoE parameter count test passed")
+
+
 def run_all_tests():
     """Run all tests."""
     print("Running Next Target Prediction UserIDs Tests")
@@ -847,6 +1156,11 @@ def run_all_tests():
     test_model_architecture_validation()
     test_loss_bounds_and_metrics()
     test_batch_size_consistency()
+    test_moe_interaction_type()
+    test_moe_vs_mlp_comparison()
+    test_moe_gating_behavior()
+    test_moe_device_consistency()
+    test_moe_parameter_count()
     
     print("\n" + "=" * 50)
     print("All tests completed successfully! ✓")
