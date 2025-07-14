@@ -52,15 +52,47 @@ pip install -r requirements.txt
 # Run tests
 python tests/test_next_target_prediction_userids.py
 
-# Train with MLP (simpler, faster)
-cd test_data
-PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_realistic_data.py --history_encoder_type transformer --interaction_type mlp
+# Train on regular dataset with MLP (simpler, faster)
+PYTORCH_ENABLE_MPS_FALLBACK=1 python test_data/train_friend_recommendation.py --dataset regular --history_encoder_type transformer --interaction_type mlp
 
-# Train with MoE (best performance)
-PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_realistic_data.py --history_encoder_type transformer --interaction_type moe --num_experts 4
+# Train on regular dataset with MoE (best performance)
+PYTORCH_ENABLE_MPS_FALLBACK=1 python test_data/train_friend_recommendation.py --dataset regular --history_encoder_type transformer --interaction_type moe --num_experts 4
+
+# Train on 4x larger dataset with MoE
+PYTORCH_ENABLE_MPS_FALLBACK=1 python test_data/train_friend_recommendation.py --dataset 4x --interaction_type moe --num_experts 4
 
 # Train with simple attention (educational)
-PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_realistic_data.py --history_encoder_type simple_attention
+PYTORCH_ENABLE_MPS_FALLBACK=1 python test_data/train_friend_recommendation.py --dataset regular --history_encoder_type simple_attention
+```
+
+## Unified Training Script
+
+The `test_data/train_friend_recommendation.py` script provides a unified interface for training on both datasets:
+
+### Key Features
+- **Dataset Selection**: Choose between `regular` and `4x` datasets
+- **Auto-detection**: Automatically detects optimal hyperparameters for each dataset
+- **Flexible Configuration**: Override any hyperparameter via command line arguments
+- **Consistent Interface**: Same training pipeline for both datasets
+- **Organized Structure**: Datasets are stored in `test_data/regular/` and `test_data/4x/`
+
+### Dataset-Specific Optimizations
+- **Regular Dataset**: 32 batch size, 128 embedding dim, 256 hidden dim, Adam optimizer
+- **4x Dataset**: 128 batch size, 256 embedding dim, 512 hidden dim, AdamW optimizer
+
+### Command Line Options
+```bash
+--dataset {regular,4x}           # Dataset to use
+--data_dir PATH                  # Custom data directory
+--history_encoder_type {transformer,simple_attention}
+--interaction_type {mlp,moe}     # Interaction modeling approach
+--num_experts INT                # Number of MoE experts
+--num_epochs INT                 # Training epochs
+--batch_size INT                 # Batch size
+--learning_rate FLOAT            # Learning rate
+--embedding_dim INT              # Embedding dimension
+--hidden_dim INT                 # Hidden dimension
+--output_dir PATH                # Output directory
 ```
 
 ## Results & Performance
@@ -112,8 +144,16 @@ generative_friending_recommendations/
 │   ├── README.md                           # Detailed documentation
 │   └── example_usage.py                    # Usage examples
 ├── test_data/                              # Training data and scripts
-│   ├── train_with_realistic_data.py        # Main training script
-│   └── social_network_data.json            # Realistic test data
+│   ├── train_friend_recommendation.py      # Unified training script
+│   ├── regular/                            # Regular dataset
+│   │   ├── social_network_data.json        # Regular test data
+│   │   ├── data_loader.py                  # Data loader for regular dataset
+│   │   ├── best_model.pth                  # Trained model
+│   │   └── training_history.json           # Training history
+│   └── 4x/                                 # 4x larger dataset
+│       ├── social_network_data_4x.json     # Larger test data
+│       ├── best_model_4x.pth               # Trained model
+│       └── training_history_4x.json        # Training history
 ├── tests/                                  # Test suite
 └── README.md                               # This file
 ```
@@ -193,8 +233,7 @@ pip install -r requirements.txt
 python tests/test_next_target_prediction_userids.py
 
 # Run training
-cd test_data
-PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_realistic_data.py
+PYTORCH_ENABLE_MPS_FALLBACK=1 python test_data/train_friend_recommendation.py --dataset regular
 ```
 
 ## References
