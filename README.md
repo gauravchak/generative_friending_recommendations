@@ -203,6 +203,55 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_realistic_data.py
 - [Practical Lessons from Deep Retrieval Systems at Scale](https://ai.googleblog.com/2020/07/retrieval-augmented-generation-for.html)
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
 
+## 4X Dataset Results
+
+### Realistic Social Network Dataset (8K users, 9K actions)
+
+The 4X dataset provides a more realistic challenge with larger scale and more complex social patterns:
+
+| Approach | Test Accuracy | Test MRR | Parameters | Training Time/Epoch | Dataset |
+|----------|---------------|----------|------------|-------------------|---------|
+| **MLP (4X Dataset)** | 43.47% | 29.45% | 6,123,776 | ~55s | 8K users, 9K actions |
+| **MoE (4X Dataset)** | TBD | TBD | ~8.8M | TBD | 8K users, 9K actions |
+
+**Key Insights:**
+- **Much more realistic challenge**: 43.47% accuracy is excellent for real-world friend recommendation
+- **Larger model required**: 6.1M parameters vs 1.3M for original dataset
+- **Realistic performance**: 29.45% MRR reflects the difficulty of predicting real social patterns
+- **Overfitting challenges**: Large gap between training and test performance indicates need for regularization
+
+### Dataset Characteristics
+
+**4X Dataset Features:**
+- **8,000 users** (4x larger than original)
+- **9,148 actions** (more realistic distribution)
+- **4,279 training examples** (sparse interactions)
+- **Realistic patterns**: Age-based, geographic, and interest-based homophily
+- **Temporal dynamics**: Hour-of-day and day-of-week patterns
+- **Power law distributions**: Realistic user popularity and activity levels
+
+### Performance Comparison
+
+| Metric | Original Dataset | 4X Dataset | Notes |
+|--------|------------------|------------|-------|
+| **Users** | 2,000 | 8,000 | 4x larger |
+| **Actions** | ~20,000 | 9,148 | More realistic |
+| **Training Examples** | ~18,000 | 4,279 | Sparser interactions |
+| **Model Parameters** | 1.28M | 6.12M | 5x larger model |
+| **Test Accuracy** | 77.33% (MLP) | 43.47% (MLP) | Much harder task |
+| **Test MRR** | 46.21% (MLP) | 29.45% (MLP) | Realistic challenge |
+
+### Training the 4X Dataset
+
+```bash
+# Train with MLP on 4X dataset
+cd test_data_4x
+PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_4x_data.py --interaction_type mlp --num_epochs 20
+
+# Train with MoE on 4X dataset (when available)
+PYTORCH_ENABLE_MPS_FALLBACK=1 python train_with_4x_data.py --interaction_type moe --num_experts 4 --num_epochs 20
+```
+
 ---
 
 **Note**: This project is designed for educational purposes, demonstrating the evolution from simple attention mechanisms to sophisticated generative approaches in friend recommendation systems.
