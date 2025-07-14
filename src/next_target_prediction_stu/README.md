@@ -28,9 +28,9 @@ During training, we use ground truth tokens for conditioning:
 
 ### **Shared Components**
 ```python
-def get_user_action_repr(self, actor_stu, history_actions, history_targets, example_action):
+def get_user_action_repr(self, actor_stu, history_actions, history_targets, history_mask, example_action):
     # 1. Encode actor STU (mean pooling over 3 tokens)
-    # 2. Encode history (mean pooling over actions and target STUs)
+    # 2. Encode history (masked mean pooling over actions and target STUs)
     # 3. Encode example action
     # 4. Combine and pass through MLP
     return user_action_repr [B, hidden_dim]
@@ -57,6 +57,7 @@ class STUBatch:
     actor_stu: torch.Tensor              # [B, 3] - Current user's STU tokens
     actor_history_actions: torch.Tensor  # [B, N] - Historical action IDs
     actor_history_targets: torch.Tensor  # [B, 3N] - Historical target STUs
+    actor_history_mask: torch.Tensor     # [B, N] - Validity mask for variable-length histories
     example_action: torch.Tensor         # [B] - Current action ID
     example_target_stu: torch.Tensor     # [B, 3] - Target user's STU tokens
 ```

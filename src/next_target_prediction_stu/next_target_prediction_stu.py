@@ -19,6 +19,7 @@ class STUBatch:
     actor_stu: torch.Tensor  # [B, 3] - Current user's 3 STU tokens
     actor_history_actions: torch.Tensor  # [B, N] - Historical action IDs
     actor_history_targets: torch.Tensor  # [B, 3N] - Historical target STUs (3 tokens each)
+    actor_history_mask: torch.Tensor  # [B, N] - Validity mask for variable-length histories
     example_action: torch.Tensor  # [B] - Current action ID
     example_target_stu: torch.Tensor  # [B, 3] - Target user's 3 STU tokens
 
@@ -88,7 +89,7 @@ class NextTargetPredictionSTU(nn.Module):
         )
 
     def get_user_action_repr(self, actor_stu: torch.Tensor, history_actions: torch.Tensor,
-                           history_targets: torch.Tensor, example_action: torch.Tensor) -> torch.Tensor:
+                           history_targets: torch.Tensor, history_mask: torch.Tensor, example_action: torch.Tensor) -> torch.Tensor:
         """
         Get unified user-action representation.
 
@@ -96,6 +97,7 @@ class NextTargetPredictionSTU(nn.Module):
             actor_stu: [B, 3] - Current user's STU tokens
             history_actions: [B, N] - Historical action IDs
             history_targets: [B, 3N] - Historical target STUs
+            history_mask: [B, N] - Validity mask where 1=valid, 0=padding
             example_action: [B] - Current action ID
 
         Returns:
@@ -109,14 +111,16 @@ class NextTargetPredictionSTU(nn.Module):
 
         # 2. Encode history (mean pooling over all historical tokens)
         if history_actions.shape[1] > 0:  # If there's history
-            # Encode actions
+            # Apply mask to actions
             history_action_emb = self.action_embedding(history_actions)  # [B, N, embedding_dim]
-            history_action_repr = history_action_emb.mean(dim=1)  # [B, embedding_dim]
+            masked_action_emb = history_action_emb * history_mask.unsqueeze(-1)  # [B, N, embedding_dim]
+            history_action_repr = masked_action_emb.sum(dim=1) / (history_mask.sum(dim=1, keepdim=True) + 1e-8)  # [B, embedding_dim]
 
             # Encode target STUs (reshape to [B, N, 3, embedding_dim] then mean pool)
             history_targets_reshaped = history_targets.view(batch_size, -1, 3)  # [B, N, 3]
             history_target_emb = self.stu_embedding(history_targets_reshaped)  # [B, N, 3, embedding_dim]
-            history_target_repr = history_target_emb.mean(dim=(1, 2))  # [B, embedding_dim]
+            masked_target_emb = history_target_emb * history_mask.unsqueeze(-1).unsqueeze(-1)  # [B, N, 3, embedding_dim]
+            history_target_repr = masked_target_emb.sum(dim=(1, 2)) / (history_mask.sum(dim=1, keepdim=True) * 3 + 1e-8)  # [B, embedding_dim]
 
             # Combine action and target representations
             history_repr = (history_action_repr + history_target_repr) / 2  # [B, embedding_dim]
@@ -194,6 +198,7 @@ class NextTargetPredictionSTU(nn.Module):
             batch.actor_stu,
             batch.actor_history_actions,
             batch.actor_history_targets,
+            batch.actor_history_mask,
             batch.example_action
         )
 

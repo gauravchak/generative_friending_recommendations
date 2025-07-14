@@ -50,10 +50,16 @@ class TestNextTargetPredictionSTU:
         batch_size = batch_params['batch_size']
         history_length = batch_params['history_length']
         
+        history_mask = torch.ones(batch_size, history_length, dtype=torch.float)
+        # For robust testing, let's mask the first history item for each example
+        if history_length > 0:
+            history_mask[:, 0] = 0
+        
         return STUBatch(
             actor_stu=torch.randint(0, vocab_size, (batch_size, 3)),
             actor_history_actions=torch.randint(0, num_actions, (batch_size, history_length)),
             actor_history_targets=torch.randint(0, vocab_size, (batch_size, 3 * history_length)),
+            actor_history_mask=history_mask,
             example_action=torch.randint(0, num_actions, (batch_size,)),
             example_target_stu=torch.randint(0, vocab_size, (batch_size, 3))
         )
@@ -82,6 +88,7 @@ class TestNextTargetPredictionSTU:
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
             sample_batch.actor_history_targets,
+            sample_batch.actor_history_mask,
             sample_batch.example_action
         )
         
@@ -98,6 +105,7 @@ class TestNextTargetPredictionSTU:
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
             sample_batch.actor_history_targets,
+            sample_batch.actor_history_mask,
             sample_batch.example_action
         )
         
@@ -116,6 +124,7 @@ class TestNextTargetPredictionSTU:
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
             sample_batch.actor_history_targets,
+            sample_batch.actor_history_mask,
             sample_batch.example_action
         )
         
@@ -132,6 +141,7 @@ class TestNextTargetPredictionSTU:
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
             sample_batch.actor_history_targets,
+            sample_batch.actor_history_mask,
             sample_batch.example_action
         )
         
@@ -181,6 +191,7 @@ class TestNextTargetPredictionSTU:
             actor_stu=torch.randint(0, vocab_size, (batch_size, 3)),
             actor_history_actions=torch.empty(batch_size, 0, dtype=torch.long),
             actor_history_targets=torch.empty(batch_size, 0, dtype=torch.long),
+            actor_history_mask=torch.empty(batch_size, 0, dtype=torch.float),
             example_action=torch.randint(0, num_actions, (batch_size,)),
             example_target_stu=torch.randint(0, vocab_size, (batch_size, 3))
         )
@@ -202,6 +213,7 @@ class TestNextTargetPredictionSTU:
                 actor_stu=torch.randint(0, vocab_size, (batch_size, 3)),
                 actor_history_actions=torch.randint(0, num_actions, (batch_size, 3)),
                 actor_history_targets=torch.randint(0, vocab_size, (batch_size, 9)),
+                actor_history_mask=torch.ones(batch_size, 3, dtype=torch.float),
                 example_action=torch.randint(0, num_actions, (batch_size,)),
                 example_target_stu=torch.randint(0, vocab_size, (batch_size, 3))
             )
@@ -229,6 +241,7 @@ class TestNextTargetPredictionSTU:
             actor_stu=torch.randint(0, vocab_size, (4, 3), device=device),
             actor_history_actions=torch.randint(0, num_actions, (4, 3), device=device),
             actor_history_targets=torch.randint(0, vocab_size, (4, 9), device=device),
+            actor_history_mask=torch.ones(4, 3, dtype=torch.float, device=device),
             example_action=torch.randint(0, num_actions, (4,), device=device),
             example_target_stu=torch.randint(0, vocab_size, (4, 3), device=device)
         )
@@ -254,6 +267,7 @@ if __name__ == "__main__":
         actor_stu=torch.randint(0, 10000, (4, 3)),
         actor_history_actions=torch.randint(0, 5, (4, 3)),
         actor_history_targets=torch.randint(0, 10000, (4, 9)),
+        actor_history_mask=torch.ones(4, 3, dtype=torch.float),
         example_action=torch.randint(0, 5, (4,)),
         example_target_stu=torch.randint(0, 10000, (4, 3))
     )
