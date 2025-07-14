@@ -13,6 +13,7 @@ import numpy as np
 from datetime import datetime
 import os
 import sys
+import argparse
 from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 
@@ -320,7 +321,33 @@ class Trainer4X:
 
 def main():
     """Main training function."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train friend recommendation model with 4X dataset')
+    parser.add_argument('--interaction_type', type=str, default='mlp',
+                       choices=['mlp', 'moe'],
+                       help='Type of interaction modeling to use (default: mlp)')
+    parser.add_argument('--num_experts', type=int, default=4,
+                       help='Number of experts for MoE (default: 4)')
+    parser.add_argument('--num_epochs', type=int, default=20,
+                       help='Number of training epochs (default: 20)')
+    parser.add_argument('--batch_size', type=int, default=128,
+                       help='Batch size for training (default: 128)')
+    parser.add_argument('--embedding_dim', type=int, default=256,
+                       help='Embedding dimension (default: 256)')
+    parser.add_argument('--hidden_dim', type=int, default=512,
+                       help='Hidden dimension (default: 512)')
+    
+    args = parser.parse_args()
+    
     print("Friend Recommendation Model Training (4X Dataset)")
+    print("=" * 60)
+    print(f"Interaction Type: {args.interaction_type}")
+    if args.interaction_type == 'moe':
+        print(f"Number of Experts: {args.num_experts}")
+    print(f"Number of Epochs: {args.num_epochs}")
+    print(f"Batch Size: {args.batch_size}")
+    print(f"Embedding Dimension: {args.embedding_dim}")
+    print(f"Hidden Dimension: {args.hidden_dim}")
     print("=" * 60)
     
     # Check for GPU
@@ -357,7 +384,7 @@ def main():
     print(f"  Test: {len(test_dataset):,} examples")
     
     # Create data loaders with larger batch sizes
-    batch_size = 128  # 4x larger batch size
+    batch_size = args.batch_size
     num_workers = 4
     
     train_loader = DataLoader(
@@ -383,12 +410,14 @@ def main():
     model = NextTargetPredictionUserIDs(
         num_users=num_users,
         num_actions=num_actions,
-        embedding_dim=256,  # Larger embeddings for bigger dataset
-        hidden_dim=512,     # Larger hidden dimensions
+        embedding_dim=args.embedding_dim,
+        hidden_dim=args.hidden_dim,
         num_negatives=15,   # More negatives
         dropout=0.2,        # Slightly more dropout
         batch_size=batch_size,
-        device=device
+        device=device,
+        interaction_type=args.interaction_type,
+        num_experts=args.num_experts
     )
     
     # Create trainer
@@ -396,7 +425,7 @@ def main():
     
     # Train model
     print("Starting training...")
-    training_history = trainer.train(train_loader, val_loader, num_epochs=20)
+    training_history = trainer.train(train_loader, val_loader, num_epochs=args.num_epochs)
     
     # Evaluate on test set
     print("\nEvaluating on test set...")
