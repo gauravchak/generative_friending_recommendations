@@ -31,25 +31,25 @@ class MixtureOfExperts(nn.Module):
     Creates multiple expert networks and learns to gate between them
     based on the input features.
     """
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_experts: int = 4, device: str = "cpu"):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_experts: int = 4):
         super().__init__()
         self.num_experts = num_experts
         
         # Expert networks
         self.experts = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(input_dim, hidden_dim, device=device),
+                nn.Linear(input_dim, hidden_dim),
                 nn.GELU(),
-                nn.Linear(hidden_dim, output_dim, device=device)
+                nn.Linear(hidden_dim, output_dim)
             )
             for _ in range(num_experts)
         ])
         
         # Gating network
         self.gate = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim // 2, device=device),
+            nn.Linear(input_dim, hidden_dim // 2),
             nn.GELU(),
-            nn.Linear(hidden_dim // 2, num_experts, device=device),
+            nn.Linear(hidden_dim // 2, num_experts),
             nn.Softmax(dim=-1)
         )
     
@@ -57,13 +57,8 @@ class MixtureOfExperts(nn.Module):
         # Get gating weights
         gate_weights = self.gate(x)  # [B, num_experts]
         
-        # Get expert outputs
-        expert_outputs = []
-        for expert in self.experts:
-            expert_outputs.append(expert(x))  # [B, output_dim]
-        
-        # Stack expert outputs
-        expert_outputs = torch.stack(expert_outputs, dim=1)  # [B, num_experts, output_dim]
+        # Get expert outputs using list comprehension
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)  # [B, num_experts, output_dim]
         
         # Weighted combination
         output = torch.sum(gate_weights.unsqueeze(-1) * expert_outputs, dim=1)  # [B, output_dim]
@@ -139,14 +134,14 @@ class NextTargetPredictionUserIDs(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_negatives = num_negatives
         self.batch_size = batch_size
-        self.device = device
+        self.device = device  # Keep for backward compatibility with tests
         self.history_encoder_type = history_encoder_type
         self.interaction_type = interaction_type
         self.num_experts = num_experts
         
         # User and action embeddings
-        self.user_embeddings = nn.Embedding(num_users, embedding_dim, device=device)
-        self.action_embeddings = nn.Embedding(num_actions, embedding_dim, device=device)
+        self.user_embeddings = nn.Embedding(num_users, embedding_dim)
+        self.action_embeddings = nn.Embedding(num_actions, embedding_dim)
         
         # History encoder - processes user's interaction history
         # Each history item is: [action_embedding, target_user_embedding] concatenated
@@ -160,23 +155,22 @@ class NextTargetPredictionUserIDs(nn.Module):
                     dim_feedforward=hidden_dim,
                     dropout=dropout,
                     batch_first=True,
-                    device=device,
                 ),
                 num_layers=2,
             )
             
             # History projection layer - reduces D_emb * 2 to D_emb
             self.history_projection = nn.Sequential(
-                nn.Linear(embedding_dim * 2, embedding_dim, device=device),
+                nn.Linear(embedding_dim * 2, embedding_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
             )
         elif self.history_encoder_type == "simple_attention":
             # Simple attention components (for history_encoder_type="simple_attention")
             self.num_attention_heads = 2  # K=2 learnable query vectors
-            self.learnable_queries = nn.Parameter(torch.randn(self.num_attention_heads, embedding_dim * 2, device=device))
+            self.learnable_queries = nn.Parameter(torch.randn(self.num_attention_heads, embedding_dim * 2))
             self.simple_attention_projection = nn.Sequential(
-                nn.Linear(self.num_attention_heads * embedding_dim * 2, embedding_dim, device=device),
+                nn.Linear(self.num_attention_heads * embedding_dim * 2, embedding_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
             )
@@ -192,15 +186,14 @@ class NextTargetPredictionUserIDs(nn.Module):
                 input_dim=interaction_input_dim,
                 hidden_dim=hidden_dim,
                 output_dim=embedding_dim,
-                num_experts=num_experts,
-                device=device
+                num_experts=num_experts
             )
         else:  # mlp
             self.interaction_network = nn.Sequential(
-                nn.Linear(interaction_input_dim, hidden_dim, device=device),
+                nn.Linear(interaction_input_dim, hidden_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(hidden_dim, embedding_dim, device=device),
+                nn.Linear(hidden_dim, embedding_dim),
             )
         
         # Initialize embeddings

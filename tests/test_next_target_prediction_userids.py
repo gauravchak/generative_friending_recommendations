@@ -660,8 +660,9 @@ def test_device_consistency():
             num_negatives=5,
             dropout=0.1,
             batch_size=8,
-            device="mps",
         )
+        model_mps = model_mps.to("mps")
+        model_mps.device = "mps"
         
         batch_mps = create_sample_batch(num_users=1000, num_actions=10, model=model_mps)
         
@@ -1053,10 +1054,11 @@ def test_moe_device_consistency():
             num_negatives=5,
             dropout=0.1,
             batch_size=8,
-            device="mps",
             interaction_type="moe",
             num_experts=4,
         )
+        model_mps = model_mps.to("mps")
+        model_mps.device = "mps"
         
         batch_mps = create_sample_batch(num_users=1000, num_actions=10, model=model_mps)
         
