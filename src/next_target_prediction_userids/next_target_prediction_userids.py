@@ -13,15 +13,62 @@ class SwiGLU(nn.Module):
     It's particularly effective for transformer-based models and can provide better
     feature selection and interaction modeling than GELU.
     """
-    def __init__(self, input_dim: int, hidden_dim: int, device: str = "cpu"):
+    def __init__(self, input_dim: int, hidden_dim: int):
         super().__init__()
-        self.w_gate = nn.Linear(input_dim, hidden_dim, device=device)
-        self.w_value = nn.Linear(input_dim, hidden_dim, device=device)
+        self.w_gate = nn.Linear(input_dim, hidden_dim)
+        self.w_value = nn.Linear(input_dim, hidden_dim)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = F.silu(self.w_gate(x))  # Swish/SiLU activation
         value = self.w_value(x)
         return gate * value  # Element-wise multiplication
+
+
+class MixtureOfExperts(nn.Module):
+    """
+    Simple Mixture of Experts layer for interaction modeling.
+    
+    Creates multiple expert networks and learns to gate between them
+    based on the input features.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_experts: int = 4, device: str = "cpu"):
+        super().__init__()
+        self.num_experts = num_experts
+        
+        # Expert networks
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim, hidden_dim, device=device),
+                nn.GELU(),
+                nn.Linear(hidden_dim, output_dim, device=device)
+            )
+            for _ in range(num_experts)
+        ])
+        
+        # Gating network
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim // 2, device=device),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, num_experts, device=device),
+            nn.Softmax(dim=-1)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Get gating weights
+        gate_weights = self.gate(x)  # [B, num_experts]
+        
+        # Get expert outputs
+        expert_outputs = []
+        for expert in self.experts:
+            expert_outputs.append(expert(x))  # [B, output_dim]
+        
+        # Stack expert outputs
+        expert_outputs = torch.stack(expert_outputs, dim=1)  # [B, num_experts, output_dim]
+        
+        # Weighted combination
+        output = torch.sum(gate_weights.unsqueeze(-1) * expert_outputs, dim=1)  # [B, output_dim]
+        
+        return output
 
 
 @dataclass
@@ -64,6 +111,8 @@ class NextTargetPredictionUserIDs(nn.Module):
         batch_size: int = 32,
         device: str = "cpu",
         history_encoder_type: str = "transformer",
+        interaction_type: str = "mlp",  # "mlp" or "moe"
+        num_experts: int = 4,
     ):
         """
         Initialize the next target prediction model.
@@ -78,6 +127,9 @@ class NextTargetPredictionUserIDs(nn.Module):
             dropout: Dropout rate for regularization
             batch_size: Default batch size for training/inference
             device: Device to use for tensors ("cpu" or "cuda")
+            history_encoder_type: "transformer" or "simple_attention"
+            interaction_type: "mlp" or "moe" for modeling interactions
+            num_experts: Number of experts for MoE (if interaction_type="moe")
         """
         super().__init__()
         
@@ -89,6 +141,8 @@ class NextTargetPredictionUserIDs(nn.Module):
         self.batch_size = batch_size
         self.device = device
         self.history_encoder_type = history_encoder_type
+        self.interaction_type = interaction_type
+        self.num_experts = num_experts
         
         # User and action embeddings
         self.user_embeddings = nn.Embedding(num_users, embedding_dim, device=device)
@@ -129,24 +183,25 @@ class NextTargetPredictionUserIDs(nn.Module):
         else:
             raise ValueError(f"Unknown history_encoder_type: {self.history_encoder_type}")
         
-        # Actor representation network
-        self.actor_projection = nn.Sequential(
-            nn.Linear(embedding_dim + embedding_dim + embedding_dim, hidden_dim, device=device),  # actor_id + history_repr + latent_cross
-            nn.GELU(),  # To use SwiGLU instead, replace with: SwiGLU(hidden_dim, hidden_dim, device=device)
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embedding_dim, device=device),
-        )
+        # Unified interaction modeling
+        # Input: [actor_embed, history_repr, action_embed, actor*history, actor*action] = D_emb * 5
+        interaction_input_dim = embedding_dim * 5
         
-        # Actor projection for latent cross (projects actor_embeds to match history_repr dimension)
-        self.actor_projection_for_cross = nn.Linear(embedding_dim, embedding_dim, device=device)
-        
-        # Target prediction network
-        self.get_actor_action_repr = nn.Sequential(
-            nn.Linear(embedding_dim * 3, hidden_dim, device=device),  # actor_repr + action_emb + interaction
-            nn.GELU(),  # To use SwiGLU instead, replace with: SwiGLU(hidden_dim, hidden_dim, device=device)
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embedding_dim, device=device),  # Output D_emb for dot product operations
-        )
+        if interaction_type == "moe":
+            self.interaction_network = MixtureOfExperts(
+                input_dim=interaction_input_dim,
+                hidden_dim=hidden_dim,
+                output_dim=embedding_dim,
+                num_experts=num_experts,
+                device=device
+            )
+        else:  # mlp
+            self.interaction_network = nn.Sequential(
+                nn.Linear(interaction_input_dim, hidden_dim, device=device),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, embedding_dim, device=device),
+            )
         
         # Initialize embeddings
         self._init_embeddings()
@@ -377,7 +432,16 @@ class NextTargetPredictionUserIDs(nn.Module):
         example_action: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Forward pass of the model.
+        Simplified forward pass that creates a unified representation.
+        
+        Creates a D_emb * 5 representation from:
+        1. Actor embedding (D_emb)
+        2. History representation (D_emb) 
+        3. Action embedding (D_emb)
+        4. Actor * History interaction (D_emb)
+        5. Actor * Action interaction (D_emb)
+        
+        Then passes through either a 2-layer MLP or MoE for final representation.
         
         Args:
             actor_id: [B] - actor user IDs
@@ -391,42 +455,32 @@ class NextTargetPredictionUserIDs(nn.Module):
         Returns:
             torch.Tensor: [B, D_emb] - actor-action representation for retrieval
         """
-        # Get actor embeddings
+        # Get basic embeddings
         actor_embeds = self.user_embeddings(actor_id)  # [B, D_emb]
-
+        action_embeds = self.action_embeddings(example_action)  # [B, D_emb]
+        
         # Encode history
         history_repr = self.encode_history_for_target(
             actor_history_actions, 
             actor_history_targets, 
             actor_history_mask
         )  # [B, D_emb]
-
-        # Combine actor and history representations with latent cross interaction
-        # Inspired by Google's "latent cross" approach: concatenate + elementwise product
-        actor_history_concat = torch.cat([actor_embeds, history_repr], dim=-1)  # [B, D_emb + D_emb]
         
-        # Project actor embeddings to match history representation dimension for latent cross
-        actor_embeds_projected = self.actor_projection_for_cross(actor_embeds)  # [B, D_emb]
-        actor_history_cross = actor_embeds_projected * history_repr  # [B, D_emb] - elementwise product
+        # Create interaction terms
+        actor_history_interaction = actor_embeds * history_repr  # [B, D_emb]
+        actor_action_interaction = actor_embeds * action_embeds  # [B, D_emb]
         
-        # Concatenate all three: actor_embeds, history_repr, and their elementwise product
-        actor_history_input = torch.cat([actor_history_concat, actor_history_cross], dim=-1)  # [B, D_emb + D_emb + D_emb]
-        actor_repr = self.actor_projection(actor_history_input)  # [B, D_emb]
+        # Concatenate all components into unified representation
+        unified_repr = torch.cat([
+            actor_embeds,              # [B, D_emb]
+            history_repr,              # [B, D_emb]
+            action_embeds,             # [B, D_emb]
+            actor_history_interaction, # [B, D_emb]
+            actor_action_interaction   # [B, D_emb]
+        ], dim=-1)  # [B, D_emb * 5]
         
-        # Get action embeddings
-        action_embeds = self.action_embeddings(example_action)  # [B, D_emb]
-        
-        # Create actor-action representation: concatenate actor_repr, action_repr, and their elementwise product
-        actor_action_repr = torch.cat([
-            actor_repr, 
-            action_embeds, 
-            actor_repr * action_embeds  # Elementwise product for interaction modeling
-        ], dim=-1)  # [B, D_emb * 3]
-        
-        # Pass through MLP to get final actor-action representation
-        actor_action_repr = self.get_actor_action_repr(actor_action_repr)  # [B, D_emb]
-        # Don't squeeze - keep the embedding dimension for dot product operations
-        # actor_action_repr = actor_action_repr.squeeze(-1)  # [B]
+        # Pass through interaction network (MLP or MoE)
+        actor_action_repr = self.interaction_network(unified_repr)  # [B, D_emb]
         
         return actor_action_repr
     
@@ -606,31 +660,32 @@ class NextTargetPredictionUserIDs(nn.Module):
         actor_embeds = self.user_embeddings(batch.actor_id)  # [B, D_emb]
         actor_embeds_expanded = actor_embeds.unsqueeze(1).expand(-1, len(temporal_positions), -1)  # [B, num_temporal, D_emb]
         
-        # Combine actor and temporal history representations with latent cross interaction
-        # Inspired by Google's "latent cross" approach: concatenate + elementwise product
-        actor_temporal_concat = torch.cat([actor_embeds_expanded, temporal_reprs], dim=-1)  # [B, num_temporal, D_emb + D_emb]
-        
-        # Project actor embeddings to match temporal representation dimension for latent cross
-        actor_embeds_projected = self.actor_projection_for_cross(actor_embeds)  # [B, D_emb]
-        actor_embeds_projected_expanded = actor_embeds_projected.unsqueeze(1).expand(-1, len(temporal_positions), -1)  # [B, num_temporal, D_emb]
-        actor_temporal_cross = actor_embeds_projected_expanded * temporal_reprs  # [B, num_temporal, D_emb] - elementwise product
-        
-        # Concatenate all three: actor_embeds, temporal_reprs, and their elementwise product
-        actor_temporal_input = torch.cat([actor_temporal_concat, actor_temporal_cross], dim=-1)  # [B, num_temporal, D_emb + D_emb + D_emb]
-        actor_reprs = self.actor_projection(actor_temporal_input)  # [B, num_temporal, D_emb]
-        
         # Get action embeddings for temporal actions
         action_embeds = self.action_embeddings(temporal_actions)  # [B, num_temporal, D_emb]
         
-        # Create actor-action representations
-        actor_action_input = torch.cat([
-            actor_reprs, 
-            action_embeds, 
-            actor_reprs * action_embeds  # Elementwise product
-        ], dim=-1)  # [B, num_temporal, D_emb * 3]
+        # Create unified representations for each temporal position
+        # For each temporal position, create the same D_emb * 5 representation as in forward()
+        actor_history_interaction = actor_embeds_expanded * temporal_reprs  # [B, num_temporal, D_emb]
+        actor_action_interaction = actor_embeds_expanded * action_embeds  # [B, num_temporal, D_emb]
         
-        # Final actor-action representations
-        actor_action_reprs = self.get_actor_action_repr(actor_action_input)  # [B, num_temporal, D_emb]
+        # Concatenate all components into unified representation
+        unified_repr = torch.cat([
+            actor_embeds_expanded,        # [B, num_temporal, D_emb]
+            temporal_reprs,               # [B, num_temporal, D_emb]
+            action_embeds,                # [B, num_temporal, D_emb]
+            actor_history_interaction,    # [B, num_temporal, D_emb]
+            actor_action_interaction      # [B, num_temporal, D_emb]
+        ], dim=-1)  # [B, num_temporal, D_emb * 5]
+        
+        # Reshape to process all temporal positions together
+        batch_size, num_temporal = unified_repr.shape[:2]
+        unified_repr_flat = unified_repr.view(-1, self.embedding_dim * 5)  # [B * num_temporal, D_emb * 5]
+        
+        # Pass through interaction network
+        actor_action_reprs_flat = self.interaction_network(unified_repr_flat)  # [B * num_temporal, D_emb]
+        
+        # Reshape back to [B, num_temporal, D_emb]
+        actor_action_reprs = actor_action_reprs_flat.view(batch_size, num_temporal, self.embedding_dim)  # [B, num_temporal, D_emb]
         
         # Get target embeddings for all users
         all_target_embeds = self.user_embeddings.weight  # [num_users, D_emb]
