@@ -1,0 +1,32 @@
+[tool.black]
+line-length = 88
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312'] # Adjust to your Python versions
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+  | env
+  | venv
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["generative_friending_recommendations"]
+# See isort's documentation for more options: https://pycqa.github.io/isort/docs/configuration/options.html
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint] # <--- Change here
+select = ["E", "F", "W", "I", "N", "D"]
+ignore = ["D100"]

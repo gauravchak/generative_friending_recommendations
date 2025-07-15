@@ -1,0 +1,29 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0 # Current latest stable from pre-commit-hooks repo (matches or exceeds your pre_commit version)
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+  - repo: https://github.com/psf/black
+    rev: 24.8.0 # Based on your specified black>=24.8.0, using this specific version
+    hooks:
+      - id: black
+        language_version: python3 # Ensure this matches your project's Python version
+
+  - repo: https://github.com/pycqa/isort
+    rev: 6.0.1 # Current latest stable (exceeds your isort>=5.12.0)
+    hooks:
+      - id: isort
+        args: ["--profile", "black"] # Make sure isort is black compatible
+        language_version: python3 # Ensure this matches your project's Python version
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.3 # Current latest stable (exceeds your ruff>=0.12)
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix] # --fix will automatically fix many issues
+      - id: ruff-format # Optional: Use Ruff's experimental formatter if you prefer it over Black
