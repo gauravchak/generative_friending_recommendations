@@ -27,6 +27,7 @@ known_first_party = ["generative_friending_recommendations"]
 [tool.ruff]
 line-length = 88
 
-[tool.ruff.lint] # <--- Change here
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D"]
-ignore = ["D100"]
+ignore = ["D100", "D102", "D107", "D400", "D415"]
+extend-ignore = ["E501"] # This ignores E501 everywhere

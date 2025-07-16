@@ -1,0 +1,34 @@
+// .vscode/settings.json
+{
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "ms-python.python", // Ensure Python extension is default for Python files
+    "[python]": {
+        // We'll rely on Ruff for formatting and organizing imports
+        "editor.defaultFormatter": "ms-python.python", // This keeps Python extension as default
+        "editor.codeActionsOnSave": {
+            // "source.organizeImports": "explicit" // REMOVE this if you use ruff.organizeImports
+        },
+        "editor.tabSize": 4 // Ruff format defaults to 4 spaces
+    },
+    // Python Extension Specific Settings
+    // REMOVE these if you are exclusively using Ruff for formatting
+    // "python.formatting.provider": "black",
+    // "python.formatting.blackArgs": [
+    //     "--line-length",
+    //     "88" // Must match your pyproject.toml
+    // ],
+
+    // Ruff specific settings
+    "ruff.args": [
+        "--fix", // Automatically fix linting issues on save
+        "--select", "E,F,W,I,N,D", // Optional: Specify rules if not fully covered by pyproject.toml
+        "--ignore", "D104" // Optional: Ignore specific rules like D104 for __init__.py here or in pyproject.toml
+    ],
+    "ruff.format.args": [
+        "--line-length",
+        "88" // Must match your pyproject.toml
+    ],
+    "ruff.organizeImports": true, // Enable Ruff to organize imports on save
+    "ruff.path": ["${workspaceFolder}/.venv/bin/ruff", "ruff"], // Optional: Helps VS Code find Ruff if it's in a venv
+    "ruff.format.path": ["${workspaceFolder}/.venv/bin/ruff", "ruff"] // Optional: Helps VS Code find ruff-format
+}
