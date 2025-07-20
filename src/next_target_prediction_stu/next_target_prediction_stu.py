@@ -2,38 +2,39 @@
 """
 Social Tokenized UserIDs (STU) model for friend recommendation.
 
-This model represents users as 3-token sequences and predicts target users
+This model represents users as token sequences and predicts target users
 autoregressively, one token at a time.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 from dataclasses import dataclass
 
 
 @dataclass
 class STUBatch:
     """Batch of STU training examples."""
-    actor_stu: torch.Tensor  # [B, 3] - Current user's 3 STU tokens
+    actor_stu: torch.Tensor  # [B, num_codebooks] - Current user's STU tokens
     actor_history_actions: torch.Tensor  # [B, N] - Historical action IDs
-    actor_history_targets: torch.Tensor  # [B, 3N] - Historical target STUs (3 tokens each)
+    actor_history_targets: torch.Tensor  # [B, num_codebooks*N] - Historical target STUs
     actor_history_mask: torch.Tensor  # [B, N] - Validity mask for variable-length histories
     example_action: torch.Tensor  # [B] - Current action ID
-    example_target_stu: torch.Tensor  # [B, 3] - Target user's 3 STU tokens
+    example_target_stu: torch.Tensor  # [B, num_codebooks] - Target user's STU tokens
 
 
 class NextTargetPredictionSTU(nn.Module):
     """
     Social Tokenized UserIDs model for next target prediction.
 
-    Predicts target users as 3-token sequences autoregressively.
+    Predicts target users as token sequences autoregressively.
     """
 
     def __init__(
         self,
         num_actions: int,
+        num_codebooks: int = 3,  # Number of tokens per user (was hardcoded to 3)
         vocab_size: int = 10000,  # Size of each STU level vocabulary
         embedding_dim: int = 128,
         hidden_dim: int = 256,
@@ -44,6 +45,7 @@ class NextTargetPredictionSTU(nn.Module):
 
         Args:
             num_actions: Number of possible actions
+            num_codebooks: Number of tokens per user (default: 3)
             vocab_size: Size of vocabulary for each STU level (default: 10000)
             embedding_dim: Dimension of embeddings
             hidden_dim: Dimension of hidden layers
@@ -52,6 +54,7 @@ class NextTargetPredictionSTU(nn.Module):
         super().__init__()
 
         self.num_actions = num_actions
+        self.num_codebooks = num_codebooks
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
@@ -69,24 +72,17 @@ class NextTargetPredictionSTU(nn.Module):
             nn.ReLU()
         )
 
-        # Tower-specific layers
-        self.tower_1_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, vocab_size, device=device)
-        )
-
-        self.tower_2_mlp = nn.Sequential(
-            nn.Linear(hidden_dim + embedding_dim, hidden_dim, device=device),  # + token_0 embedding
-            nn.ReLU(),
-            nn.Linear(hidden_dim, vocab_size, device=device)
-        )
-
-        self.tower_3_mlp = nn.Sequential(
-            nn.Linear(hidden_dim + embedding_dim * 2, hidden_dim, device=device),  # + token_0, token_1 embeddings
-            nn.ReLU(),
-            nn.Linear(hidden_dim, vocab_size, device=device)
-        )
+        # Unified tower layers - one for each codebook position
+        self.tower_layers = nn.ModuleList()
+        for i in range(num_codebooks):
+            # Input size: hidden_dim + i * embedding_dim (for previous tokens)
+            input_size = hidden_dim + i * embedding_dim
+            tower = nn.Sequential(
+                nn.Linear(input_size, hidden_dim, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, vocab_size, device=device)
+            )
+            self.tower_layers.append(tower)
 
     def get_user_action_repr(self, actor_stu: torch.Tensor, history_actions: torch.Tensor,
                            history_targets: torch.Tensor, history_mask: torch.Tensor, example_action: torch.Tensor) -> torch.Tensor:
@@ -94,9 +90,9 @@ class NextTargetPredictionSTU(nn.Module):
         Get unified user-action representation.
 
         Args:
-            actor_stu: [B, 3] - Current user's STU tokens
+            actor_stu: [B, num_codebooks] - Current user's STU tokens
             history_actions: [B, N] - Historical action IDs
-            history_targets: [B, 3N] - Historical target STUs
+            history_targets: [B, num_codebooks*N] - Historical target STUs
             history_mask: [B, N] - Validity mask where 1=valid, 0=padding
             example_action: [B] - Current action ID
 
@@ -105,8 +101,8 @@ class NextTargetPredictionSTU(nn.Module):
         """
         batch_size = actor_stu.shape[0]
 
-        # 1. Encode actor STU (mean pooling over 3 tokens)
-        actor_stu_emb = self.stu_embedding(actor_stu)  # [B, 3, embedding_dim]
+        # 1. Encode actor STU (mean pooling over num_codebooks tokens)
+        actor_stu_emb = self.stu_embedding(actor_stu)  # [B, num_codebooks, embedding_dim]
         actor_repr = actor_stu_emb.mean(dim=1)  # [B, embedding_dim]
 
         # 2. Encode history (mean pooling over all historical tokens)
@@ -116,11 +112,11 @@ class NextTargetPredictionSTU(nn.Module):
             masked_action_emb = history_action_emb * history_mask.unsqueeze(-1)  # [B, N, embedding_dim]
             history_action_repr = masked_action_emb.sum(dim=1) / (history_mask.sum(dim=1, keepdim=True) + 1e-8)  # [B, embedding_dim]
 
-            # Encode target STUs (reshape to [B, N, 3, embedding_dim] then mean pool)
-            history_targets_reshaped = history_targets.view(batch_size, -1, 3)  # [B, N, 3]
-            history_target_emb = self.stu_embedding(history_targets_reshaped)  # [B, N, 3, embedding_dim]
-            masked_target_emb = history_target_emb * history_mask.unsqueeze(-1).unsqueeze(-1)  # [B, N, 3, embedding_dim]
-            history_target_repr = masked_target_emb.sum(dim=(1, 2)) / (history_mask.sum(dim=1, keepdim=True) * 3 + 1e-8)  # [B, embedding_dim]
+            # Encode target STUs (reshape to [B, N, num_codebooks, embedding_dim] then mean pool)
+            history_targets_reshaped = history_targets.view(batch_size, -1, self.num_codebooks)  # [B, N, num_codebooks]
+            history_target_emb = self.stu_embedding(history_targets_reshaped)  # [B, N, num_codebooks, embedding_dim]
+            masked_target_emb = history_target_emb * history_mask.unsqueeze(-1).unsqueeze(-1)  # [B, N, num_codebooks, embedding_dim]
+            history_target_repr = masked_target_emb.sum(dim=(1, 2)) / (history_mask.sum(dim=1, keepdim=True) * self.num_codebooks + 1e-8)  # [B, embedding_dim]
 
             # Combine action and target representations
             history_repr = (history_action_repr + history_target_repr) / 2  # [B, embedding_dim]
@@ -139,49 +135,29 @@ class NextTargetPredictionSTU(nn.Module):
 
         return user_action_repr
 
-    def tower_1(self, user_action_repr: torch.Tensor) -> torch.Tensor:
+    def predict_token(self, user_action_repr: torch.Tensor, previous_tokens: List[torch.Tensor], token_idx: int) -> torch.Tensor:
         """
-        Predict first token of target STU.
+        Predict token at position token_idx given previous tokens.
 
         Args:
             user_action_repr: [B, hidden_dim] - User-action representation
+            previous_tokens: List of [B] tensors - Previous tokens (empty for first token)
+            token_idx: Index of token to predict (0-based)
 
         Returns:
-            token_0_probs: [B, vocab_size] - Probability distribution over first token
+            token_probs: [B, vocab_size] - Probability distribution over token
         """
-        return self.tower_1_mlp(user_action_repr)
-
-    def tower_2(self, user_action_repr: torch.Tensor, token_0: torch.Tensor) -> torch.Tensor:
-        """
-        Predict second token of target STU (given first token).
-
-        Args:
-            user_action_repr: [B, hidden_dim] - User-action representation
-            token_0: [B] - First token (for teacher forcing)
-
-        Returns:
-            token_1_probs: [B, vocab_size] - Probability distribution over second token
-        """
-        token_0_emb = self.stu_embedding(token_0)  # [B, embedding_dim]
-        combined = torch.cat([user_action_repr, token_0_emb], dim=1)  # [B, hidden_dim + embedding_dim]
-        return self.tower_2_mlp(combined)
-
-    def tower_3(self, user_action_repr: torch.Tensor, token_0: torch.Tensor, token_1: torch.Tensor) -> torch.Tensor:
-        """
-        Predict third token of target STU (given first two tokens).
-
-        Args:
-            user_action_repr: [B, hidden_dim] - User-action representation
-            token_0: [B] - First token
-            token_1: [B] - Second token
-
-        Returns:
-            token_2_probs: [B, vocab_size] - Probability distribution over third token
-        """
-        token_0_emb = self.stu_embedding(token_0)  # [B, embedding_dim]
-        token_1_emb = self.stu_embedding(token_1)  # [B, embedding_dim]
-        combined = torch.cat([user_action_repr, token_0_emb, token_1_emb], dim=1)  # [B, hidden_dim + 2*embedding_dim]
-        return self.tower_3_mlp(combined)
+        # Build input by concatenating user_action_repr with previous token embeddings
+        inputs = [user_action_repr]
+        
+        for prev_token in previous_tokens:
+            prev_token_emb = self.stu_embedding(prev_token)  # [B, embedding_dim]
+            inputs.append(prev_token_emb)
+        
+        combined = torch.cat(inputs, dim=1)  # [B, hidden_dim + num_prev_tokens * embedding_dim]
+        
+        # Use the appropriate tower layer
+        return self.tower_layers[token_idx](combined)
 
     def train_forward_with_target(self, batch: STUBatch) -> Dict[str, torch.Tensor]:
         """
@@ -203,42 +179,49 @@ class NextTargetPredictionSTU(nn.Module):
         )
 
         # Extract target tokens for teacher forcing
-        target_token_0 = batch.example_target_stu[:, 0]  # [B]
-        target_token_1 = batch.example_target_stu[:, 1]  # [B]
-        target_token_2 = batch.example_target_stu[:, 2]  # [B]
+        target_tokens = [batch.example_target_stu[:, i] for i in range(self.num_codebooks)]  # List of [B] tensors
 
-        # Run all 3 towers with teacher forcing
-        token_0_logits = self.tower_1(user_action_repr)
-        token_1_logits = self.tower_2(user_action_repr, target_token_0)
-        token_2_logits = self.tower_3(user_action_repr, target_token_0, target_token_1)
+        # Run all towers with teacher forcing
+        token_logits = []
+        previous_tokens = []
+        
+        for i in range(self.num_codebooks):
+            logits = self.predict_token(user_action_repr, previous_tokens, i)
+            token_logits.append(logits)
+            previous_tokens.append(target_tokens[i])  # Use ground truth for teacher forcing
 
-        # Compute cross-entropy losses
-        loss_0 = F.cross_entropy(token_0_logits, target_token_0)
-        loss_1 = F.cross_entropy(token_1_logits, target_token_1)
-        loss_2 = F.cross_entropy(token_2_logits, target_token_2)
+        # Compute cross-entropy losses and accuracies
+        losses = []
+        accuracies = []
+        predictions = []
+        
+        for i in range(self.num_codebooks):
+            loss = F.cross_entropy(token_logits[i], target_tokens[i])
+            losses.append(loss)
+            
+            # Compute accuracy and store prediction
+            pred = token_logits[i].argmax(dim=1)
+            predictions.append(pred)
+            accuracy = (pred == target_tokens[i]).float().mean()
+            accuracies.append(accuracy)
 
-        total_loss = loss_0 + loss_1 + loss_2
-
-        # Compute accuracy (argmax prediction)
-        token_0_pred = token_0_logits.argmax(dim=1)
-        token_1_pred = token_1_logits.argmax(dim=1)
-        token_2_pred = token_2_logits.argmax(dim=1)
-
-        accuracy_0 = (token_0_pred == target_token_0).float().mean()
-        accuracy_1 = (token_1_pred == target_token_1).float().mean()
-        accuracy_2 = (token_2_pred == target_token_2).float().mean()
+        total_loss = sum(losses)
 
         # Overall accuracy (all tokens correct)
-        all_correct = (token_0_pred == target_token_0) & (token_1_pred == target_token_1) & (token_2_pred == target_token_2)
+        all_correct = torch.ones(batch.actor_stu.shape[0], dtype=torch.bool, device=self.device)
+        for i in range(self.num_codebooks):
+            all_correct = all_correct & (predictions[i] == target_tokens[i])
         overall_accuracy = all_correct.float().mean()
 
-        return {
+        # Build return dictionary
+        result = {
             'loss': total_loss,
-            'loss_0': loss_0,
-            'loss_1': loss_1,
-            'loss_2': loss_2,
-            'accuracy_0': accuracy_0,
-            'accuracy_1': accuracy_1,
-            'accuracy_2': accuracy_2,
             'overall_accuracy': overall_accuracy
         }
+        
+        # Add individual losses and accuracies
+        for i in range(self.num_codebooks):
+            result[f'loss_{i}'] = losses[i]
+            result[f'accuracy_{i}'] = accuracies[i]
+
+        return result
