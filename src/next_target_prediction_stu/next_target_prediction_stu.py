@@ -190,16 +190,18 @@ class NextTargetPredictionSTU(nn.Module):
             token_logits.append(logits)
             previous_tokens.append(target_tokens[i])  # Use ground truth for teacher forcing
 
-        # Compute cross-entropy losses
+        # Compute cross-entropy losses and accuracies
         losses = []
         accuracies = []
+        predictions = []
         
         for i in range(self.num_codebooks):
             loss = F.cross_entropy(token_logits[i], target_tokens[i])
             losses.append(loss)
             
-            # Compute accuracy
+            # Compute accuracy and store prediction
             pred = token_logits[i].argmax(dim=1)
+            predictions.append(pred)
             accuracy = (pred == target_tokens[i]).float().mean()
             accuracies.append(accuracy)
 
@@ -208,8 +210,7 @@ class NextTargetPredictionSTU(nn.Module):
         # Overall accuracy (all tokens correct)
         all_correct = torch.ones(batch.actor_stu.shape[0], dtype=torch.bool, device=self.device)
         for i in range(self.num_codebooks):
-            pred = token_logits[i].argmax(dim=1)
-            all_correct = all_correct & (pred == target_tokens[i])
+            all_correct = all_correct & (predictions[i] == target_tokens[i])
         overall_accuracy = all_correct.float().mean()
 
         # Build return dictionary
