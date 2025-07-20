@@ -7,45 +7,48 @@ The STU model represents Phase 2 of our friend recommendation progression, movin
 ## Key Concepts
 
 ### **Social Tokenized UserIDs**
-- Each user is represented by exactly 3 integers: `[token_0, token_1, token_2]`
+- Each user is represented by exactly `num_codebooks` integers: `[token_0, token_1, ..., token_{num_codebooks-1}]`
 - These tokens are derived from hierarchical clustering (assumed to be pre-computed via RQVAE)
 - Vocabulary size: 10,000 tokens per level
-- Total possible users: 10,000³ = 1 trillion (much smaller than user IDs)
+- Total possible users: 10,000^num_codebooks (configurable complexity)
+- Default: 3 tokens (10,000³ = 1 trillion users)
 
 ### **Autoregressive Prediction**
-Instead of predicting a single target, we predict 3 tokens sequentially:
-1. **Tower 1**: Predict `token_0` given user context
-2. **Tower 2**: Predict `token_1` given user context + `token_0`
-3. **Tower 3**: Predict `token_2` given user context + `token_0` + `token_1`
+Instead of predicting a single target, we predict `num_codebooks` tokens sequentially:
+1. **Tower 0**: Predict `token_0` given user context
+2. **Tower 1**: Predict `token_1` given user context + `token_0`
+3. **Tower 2**: Predict `token_2` given user context + `token_0` + `token_1`
+4. **...**: Continue for all `num_codebooks` tokens
 
 ### **Teacher Forcing**
 During training, we use ground truth tokens for conditioning:
-- Tower 1: `P(token_0 | user_context)`
-- Tower 2: `P(token_1 | user_context, target_token_0)`
-- Tower 3: `P(token_2 | user_context, target_token_0, target_token_1)`
+- Tower 0: `P(token_0 | user_context)`
+- Tower 1: `P(token_1 | user_context, target_token_0)`
+- Tower 2: `P(token_2 | user_context, target_token_0, target_token_1)`
+- Tower i: `P(token_i | user_context, target_token_0, ..., target_token_{i-1})`
 
 ## Architecture
 
 ### **Shared Components**
 ```python
 def get_user_action_repr(self, actor_stu, history_actions, history_targets, history_mask, example_action):
-    # 1. Encode actor STU (mean pooling over 3 tokens)
+    # 1. Encode actor STU (mean pooling over num_codebooks tokens)
     # 2. Encode history (masked mean pooling over actions and target STUs)
     # 3. Encode example action
     # 4. Combine and pass through MLP
     return user_action_repr [B, hidden_dim]
 ```
 
-### **Tower-Specific Components**
+### **Unified Tower Components**
 ```python
-def tower_1(self, user_action_repr):
-    # Simple MLP: user_action_repr → token_0_probs [B, 10000]
+def predict_token(self, user_action_repr, previous_tokens, token_idx):
+    # Encode previous tokens + concatenate + tower_layers[token_idx] → token_probs [B, vocab_size]
 
-def tower_2(self, user_action_repr, token_0):
-    # Encode token_0 + concatenate + MLP → token_1_probs [B, 10000]
-
-def tower_3(self, user_action_repr, token_0, token_1):
-    # Encode token_0, token_1 + concatenate + MLP → token_2_probs [B, 10000]
+# Tower layers are created dynamically:
+# tower_layers[0]: hidden_dim → vocab_size
+# tower_layers[1]: hidden_dim + embedding_dim → vocab_size  
+# tower_layers[2]: hidden_dim + 2*embedding_dim → vocab_size
+# tower_layers[i]: hidden_dim + i*embedding_dim → vocab_size
 ```
 
 ## Data Structure
@@ -54,37 +57,37 @@ def tower_3(self, user_action_repr, token_0, token_1):
 ```python
 @dataclass
 class STUBatch:
-    actor_stu: torch.Tensor              # [B, 3] - Current user's STU tokens
+    actor_stu: torch.Tensor              # [B, num_codebooks] - Current user's STU tokens
     actor_history_actions: torch.Tensor  # [B, N] - Historical action IDs
-    actor_history_targets: torch.Tensor  # [B, 3N] - Historical target STUs
+    actor_history_targets: torch.Tensor  # [B, num_codebooks*N] - Historical target STUs
     actor_history_mask: torch.Tensor     # [B, N] - Validity mask for variable-length histories
     example_action: torch.Tensor         # [B] - Current action ID
-    example_target_stu: torch.Tensor     # [B, 3] - Target user's STU tokens
+    example_target_stu: torch.Tensor     # [B, num_codebooks] - Target user's STU tokens
 ```
 
 ### **Key Differences from UserID Model**
 - **Input**: STU tokens instead of user IDs
-- **History**: Target STUs are 3N instead of N (3 tokens per target)
-- **Output**: 3 separate token predictions instead of similarity score
-- **Loss**: 3 cross-entropy losses instead of contrastive loss
+- **History**: Target STUs are `num_codebooks*N` instead of N (`num_codebooks` tokens per target)
+- **Output**: `num_codebooks` separate token predictions instead of similarity score
+- **Loss**: `num_codebooks` cross-entropy losses instead of contrastive loss
 
 ## Training
 
 ### **Loss Function**
 ```python
-total_loss = loss_0 + loss_1 + loss_2
+total_loss = loss_0 + loss_1 + ... + loss_{num_codebooks-1}
 ```
 Where each loss is cross-entropy between predicted and target tokens.
 
 ### **Metrics**
-- **Individual accuracies**: `accuracy_0`, `accuracy_1`, `accuracy_2`
-- **Overall accuracy**: All 3 tokens correct
-- **Individual losses**: `loss_0`, `loss_1`, `loss_2`
+- **Individual accuracies**: `accuracy_0`, `accuracy_1`, ..., `accuracy_{num_codebooks-1}`
+- **Overall accuracy**: All `num_codebooks` tokens correct
+- **Individual losses**: `loss_0`, `loss_1`, ..., `loss_{num_codebooks-1}`
 
 ## Simplifications in This Implementation
 
 ### **Mean Pooling Instead of Attention**
-- Actor STU: Mean pooling over 3 tokens
+- Actor STU: Mean pooling over `num_codebooks` tokens
 - History: Mean pooling over all historical tokens
 - Simple but effective baseline
 
@@ -95,6 +98,23 @@ Where each loss is cross-entropy between predicted and target tokens.
 ### **No Inference Methods**
 - Training only for now
 - Beam search and other inference methods to be added later
+
+## Parametrization Benefits
+
+### **Configurable Complexity**
+- **Flexible token count**: Use 2, 3, 4, or more tokens per user
+- **Adaptive vocabulary**: Scale from 10,000² (100M users) to 10,000⁴ (10¹⁶ users)
+- **Memory efficiency**: Choose appropriate complexity for your user base
+
+### **Unified Architecture**
+- **Single `predict_token` method**: Eliminates code duplication across towers
+- **Dynamic tower creation**: `tower_layers` created based on `num_codebooks`
+- **Consistent interface**: Same API regardless of token count
+
+### **Easy Experimentation**
+- **A/B test token counts**: Compare 2 vs 3 vs 4 tokens
+- **Progressive complexity**: Start simple, scale up as needed
+- **Backward compatibility**: Default 3 tokens maintains existing behavior
 
 ## Future Enhancements
 
@@ -109,9 +129,20 @@ Where each loss is cross-entropy between predicted and target tokens.
 ```python
 from next_target_prediction_stu import NextTargetPredictionSTU, STUBatch
 
-# Initialize model
+# Initialize model (default: 3 codebooks)
 model = NextTargetPredictionSTU(
     num_actions=5,
+    num_codebooks=3,  # Configurable number of tokens per user
+    vocab_size=10000,
+    embedding_dim=128,
+    hidden_dim=256,
+    device="cpu"
+)
+
+# Or with different number of codebooks
+model_4_tokens = NextTargetPredictionSTU(
+    num_actions=5,
+    num_codebooks=4,  # 4 tokens per user
     vocab_size=10000,
     embedding_dim=128,
     hidden_dim=256,

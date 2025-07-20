@@ -23,6 +23,7 @@ class TestNextTargetPredictionSTU:
         """Model parameters for testing."""
         return {
             'num_actions': 5,
+            'num_codebooks': 3,  # Explicitly set for testing
             'vocab_size': 10000,
             'embedding_dim': 128,
             'hidden_dim': 256,
@@ -47,6 +48,7 @@ class TestNextTargetPredictionSTU:
         """Create a sample batch for testing."""
         vocab_size = model_params['vocab_size']
         num_actions = model_params['num_actions']
+        num_codebooks = model_params['num_codebooks']
         batch_size = batch_params['batch_size']
         history_length = batch_params['history_length']
         
@@ -56,12 +58,12 @@ class TestNextTargetPredictionSTU:
             history_mask[:, 0] = 0
         
         return STUBatch(
-            actor_stu=torch.randint(0, vocab_size, (batch_size, 3)),
+            actor_stu=torch.randint(0, vocab_size, (batch_size, num_codebooks)),
             actor_history_actions=torch.randint(0, num_actions, (batch_size, history_length)),
-            actor_history_targets=torch.randint(0, vocab_size, (batch_size, 3 * history_length)),
+            actor_history_targets=torch.randint(0, vocab_size, (batch_size, num_codebooks * history_length)),
             actor_history_mask=history_mask,
             example_action=torch.randint(0, num_actions, (batch_size,)),
-            example_target_stu=torch.randint(0, vocab_size, (batch_size, 3))
+            example_target_stu=torch.randint(0, vocab_size, (batch_size, num_codebooks))
         )
     
     def test_model_initialization(self, model_params):
@@ -72,15 +74,21 @@ class TestNextTargetPredictionSTU:
         assert hasattr(model, 'action_embedding')
         assert hasattr(model, 'stu_embedding')
         assert hasattr(model, 'user_action_mlp')
-        assert hasattr(model, 'tower_1_mlp')
-        assert hasattr(model, 'tower_2_mlp')
-        assert hasattr(model, 'tower_3_mlp')
+        assert hasattr(model, 'tower_layers')
         
         # Check embedding dimensions
         assert model.action_embedding.num_embeddings == model_params['num_actions']
         assert model.action_embedding.embedding_dim == model_params['embedding_dim']
         assert model.stu_embedding.num_embeddings == model_params['vocab_size']
         assert model.stu_embedding.embedding_dim == model_params['embedding_dim']
+        
+        # Check tower layers
+        assert len(model.tower_layers) == model_params['num_codebooks']
+        for i, tower in enumerate(model.tower_layers):
+            # Check input size: hidden_dim + i * embedding_dim
+            expected_input_size = model_params['hidden_dim'] + i * model_params['embedding_dim']
+            assert tower[0].in_features == expected_input_size
+            assert tower[-1].out_features == model_params['vocab_size']
     
     def test_get_user_action_repr(self, model, sample_batch):
         """Test the user-action representation function."""
@@ -99,8 +107,8 @@ class TestNextTargetPredictionSTU:
         # Check that output is not all zeros
         assert not torch.allclose(user_action_repr, torch.zeros_like(user_action_repr))
     
-    def test_tower_1(self, model, sample_batch):
-        """Test the first tower."""
+    def test_predict_token_0(self, model, sample_batch):
+        """Test predicting the first token."""
         user_action_repr = model.get_user_action_repr(
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
@@ -109,7 +117,7 @@ class TestNextTargetPredictionSTU:
             sample_batch.example_action
         )
         
-        token_0_logits = model.tower_1(user_action_repr)
+        token_0_logits = model.predict_token(user_action_repr, [], 0)
         
         # Check output shape
         expected_shape = (sample_batch.actor_stu.shape[0], model.vocab_size)
@@ -118,8 +126,8 @@ class TestNextTargetPredictionSTU:
         # Check that logits are reasonable (not all the same)
         assert not torch.allclose(token_0_logits, token_0_logits[0].unsqueeze(0).expand_as(token_0_logits))
     
-    def test_tower_2(self, model, sample_batch):
-        """Test the second tower."""
+    def test_predict_token_1(self, model, sample_batch):
+        """Test predicting the second token."""
         user_action_repr = model.get_user_action_repr(
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
@@ -129,14 +137,14 @@ class TestNextTargetPredictionSTU:
         )
         
         token_0 = sample_batch.example_target_stu[:, 0]
-        token_1_logits = model.tower_2(user_action_repr, token_0)
+        token_1_logits = model.predict_token(user_action_repr, [token_0], 1)
         
         # Check output shape
         expected_shape = (sample_batch.actor_stu.shape[0], model.vocab_size)
         assert token_1_logits.shape == expected_shape
     
-    def test_tower_3(self, model, sample_batch):
-        """Test the third tower."""
+    def test_predict_token_2(self, model, sample_batch):
+        """Test predicting the third token."""
         user_action_repr = model.get_user_action_repr(
             sample_batch.actor_stu,
             sample_batch.actor_history_actions,
@@ -147,7 +155,7 @@ class TestNextTargetPredictionSTU:
         
         token_0 = sample_batch.example_target_stu[:, 0]
         token_1 = sample_batch.example_target_stu[:, 1]
-        token_2_logits = model.tower_3(user_action_repr, token_0, token_1)
+        token_2_logits = model.predict_token(user_action_repr, [token_0, token_1], 2)
         
         # Check output shape
         expected_shape = (sample_batch.actor_stu.shape[0], model.vocab_size)
@@ -184,16 +192,17 @@ class TestNextTargetPredictionSTU:
         """Test behavior with empty history."""
         vocab_size = model_params['vocab_size']
         num_actions = model_params['num_actions']
+        num_codebooks = model_params['num_codebooks']
         batch_size = batch_params['batch_size']
         
         # Create batch with empty history
         empty_batch = STUBatch(
-            actor_stu=torch.randint(0, vocab_size, (batch_size, 3)),
+            actor_stu=torch.randint(0, vocab_size, (batch_size, num_codebooks)),
             actor_history_actions=torch.empty(batch_size, 0, dtype=torch.long),
             actor_history_targets=torch.empty(batch_size, 0, dtype=torch.long),
             actor_history_mask=torch.empty(batch_size, 0, dtype=torch.float),
             example_action=torch.randint(0, num_actions, (batch_size,)),
-            example_target_stu=torch.randint(0, vocab_size, (batch_size, 3))
+            example_target_stu=torch.randint(0, vocab_size, (batch_size, num_codebooks))
         )
         
         # Should not raise an error
